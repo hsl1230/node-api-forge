@@ -211,6 +211,10 @@
     "package": "npm run clean && npm run build:prod && vsce package",
     "prepare": "npm run compile"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hsl1230/node-api-forge"
+  },
   "devDependencies": {
     "@types/node": "^20.x",
     "@types/vscode": "^1.99.0",
