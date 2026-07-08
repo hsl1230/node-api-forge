@@ -1,0 +1,222 @@
+{
+  "name": "node-api-forge",
+  "displayName": "Node API Forge",
+  "description": "Discover, test, and document Node APIs without Swagger—no app integration, full testing workflows, pure source-to-API in seconds.",
+  "version": "0.0.1",
+  "publisher": "henry-huang",
+  "license": "MIT",
+  "keywords": [
+    "swagger alternative",
+    "swagger-free",
+    "no swagger",
+    "http forge",
+    "http-forge",
+    "http",
+    "api",
+    "testing",
+    "api testing",
+    "api development",
+    "openapi",
+    "swagger",
+    "swagger ui",
+    "graphql",
+    "postman",
+    "postman replacement",
+    "free postman alternative",
+    "thunder client",
+    "insomnia",
+    "contract testing",
+    "openapi generator",
+    "rest-client",
+    "api-client",
+    "http-client",
+    "request",
+    "collection runner",
+    "node",
+    "node api",
+    "nodejs",
+    "express",
+    "nestjs",
+    "fastify",
+    "middleware",
+    "flow analysis",
+    "api discovery"
+  ],
+  "engines": {
+    "vscode": "^1.99.3"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "onView:nodeApiForge.apiExplorer",
+    "onCommand:nodeApiForge.discoverApis",
+    "onCommand:nodeApiForge.openEndpointInHttpForge",
+    "onCommand:nodeApiForge.openEndpointSource",
+    "onCommand:nodeApiForge.copyEndpointRequest",
+    "onCommand:nodeApiForge.exportDiscoveredCollection",
+    "onCommand:nodeApiForge.showEndpointFlow",
+    "onCommand:nodeApiForge.hardRefreshWorkspace"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "nodeApiForge.discoverApis",
+        "title": "Discover APIs",
+        "category": "Node API Forge"
+      },
+      {
+        "command": "nodeApiForge.openEndpointInHttpForge",
+        "title": "Open Endpoint in HTTP Forge",
+        "category": "Node API Forge"
+      },
+      {
+        "command": "nodeApiForge.openEndpointSource",
+        "title": "Open Endpoint Source",
+        "category": "Node API Forge"
+      },
+      {
+        "command": "nodeApiForge.copyEndpointRequest",
+        "title": "Copy Endpoint Request",
+        "category": "Node API Forge"
+      },
+      {
+        "command": "nodeApiForge.exportDiscoveredCollection",
+        "title": "Export Discovered Collection",
+        "category": "Node API Forge"
+      },
+      {
+        "command": "nodeApiForge.showEndpointFlow",
+        "title": "Show Endpoint Flow",
+        "category": "Node API Forge",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "nodeApiForge.hardRefreshWorkspace",
+        "title": "Hard Refresh Workspace",
+        "category": "Node API Forge",
+        "icon": "$(sync-ignored)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "nodeApiForge",
+          "title": "Node API Forge",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "nodeApiForge": [
+        {
+          "id": "nodeApiForge.apiExplorer",
+          "name": "API Explorer",
+          "icon": "$(type-hierarchy)"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "nodeApiForge.exportDiscoveredCollection",
+          "when": "view == nodeApiForge.apiExplorer",
+          "group": "navigation",
+          "icon": "$(export)"
+        },
+        {
+          "command": "nodeApiForge.hardRefreshWorkspace",
+          "when": "view == nodeApiForge.apiExplorer",
+          "group": "navigation",
+          "icon": "$(sync-ignored)"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "nodeApiForge.showEndpointFlow",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == endpoint",
+          "group": "inline",
+          "icon": "$(type-hierarchy)"
+        },
+        {
+          "command": "nodeApiForge.openEndpointInHttpForge",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == endpoint"
+        },
+        {
+          "command": "nodeApiForge.openEndpointSource",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == endpoint"
+        },
+        {
+          "command": "nodeApiForge.copyEndpointRequest",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == endpoint"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Node API Forge",
+      "properties": {
+        "nodeApiForge.frameworks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "express",
+              "fastify",
+              "nestjs"
+            ]
+          },
+          "default": [
+            "auto"
+          ],
+          "description": "Framework hints for discovery. Provide one or multiple values for mixed projects (for example [\"express\", \"nestjs\"]). Use [\"auto\"] to auto-detect and cache by project."
+        },
+        "nodeApiForge.customSeedLoaderModulePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a JS module that exports loadSeedManifestEndpoints(projectRoot, context). Relative to each project root unless absolute. Provide your own loader to supply seed endpoints to the extension."
+        },
+        "nodeApiForge.autoRefreshOnFileChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh discovery when relevant source files change. New files that are not yet referenced by discovered components are ignored to reduce noise."
+        },
+        "nodeApiForge.searchComponentLibAllowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Library package names that Flow Search may traverse as part of endpoint component-tree expansion (for example internal shared libs that handle params/headers). Non-allowlisted external libraries are treated as traversal boundaries."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf out",
+    "esbuild-base": "node esbuild.js",
+    "build": "npm run esbuild-base",
+    "build:dev": "npm run esbuild-base",
+    "build:prod": "npm run esbuild-base -- --production",
+    "compile": "npm run build:dev",
+    "watch": "npm run esbuild-base -- --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "npm run clean && npm run build:prod && vsce package",
+    "prepare": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.99.0",
+    "esbuild": "^0.27.0",
+    "mermaid": "^11.16.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.1.8"
+  }
+}

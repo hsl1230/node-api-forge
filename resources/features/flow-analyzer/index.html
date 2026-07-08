@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src {{cspSource}} 'unsafe-inline'; style-src {{cspSource}} 'unsafe-inline'; font-src {{cspSource}};">
+  <title>API Flow</title>
+  <link rel="stylesheet" href="{{styleUri}}">
+  <script src="{{mermaidUri}}"></script>
+</head>
+<body>
+<div class="flow-analyzer-container">
+
+  <!-- Header -->
+  <div class="flow-header">
+    <div class="endpoint-info" id="endpoint-info"></div>
+    <div class="header-actions">
+      <button class="header-btn" id="search-btn">🔎 Search</button>
+      <button class="header-btn" id="test-btn">🧪 Test</button>
+      <button class="header-btn" id="refresh-btn">🔄 Refresh</button>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tab-container">
+    <button class="tab-btn active" data-tab="flow-diagram">➡️ Flow Diagram</button>
+    <button class="tab-btn" data-tab="middleware-list">🔗 Middleware Chain</button>
+    <button class="tab-btn" data-tab="component-tree">🌳 Component Tree</button>
+    <button class="tab-btn" data-tab="data-flow">🔄 Data Flow</button>
+    <button class="tab-btn" data-tab="doc-view">📄 Documentation</button>
+  </div>
+
+  <!-- Tab Content -->
+  <div class="tab-content">
+
+    <!-- 1. Flow Diagram -->
+    <div id="flow-diagram" class="tab-panel active">
+      <div class="diagram-controls">
+        <div class="diagram-controls-left">
+          <button id="zoom-in-btn">➕ Zoom In</button>
+          <button id="zoom-out-btn">➖ Zoom Out</button>
+          <button id="center-btn">↔️ Center</button>
+          <button id="reset-zoom-btn">↺ Reset</button>
+        </div>
+        <div class="diagram-legend">
+          <span class="legend-item"><span class="legend-dot" style="background:#1e3a5f;border:1px solid #2b6cb0"></span>Request</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#2d3748;border:1px solid #4a5568"></span>Middleware</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#1a3a2a;border:1px solid #276749"></span>Handler</span>
+          <span style="color:var(--text-muted);font-size:11px;margin-left:8px">— Click a node to see details</span>
+        </div>
+      </div>
+      <div class="diagram-container" id="mermaid-diagram">
+        <div class="diagram-viewport" id="diagram-viewport">
+          <div class="loading">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Rendering flow diagram…</div>
+          </div>
+        </div>
+        <div class="zoom-info" id="zoom-info">100%</div>
+      </div>
+    </div>
+
+    <!-- 2. Middleware Chain -->
+    <div id="middleware-list" class="tab-panel">
+      <div class="middleware-chain" id="middleware-chain"></div>
+    </div>
+
+    <!-- 3. Component Tree -->
+    <div id="component-tree" class="tab-panel">
+      <div class="component-tree-header">
+        <h3>Component Hierarchy</h3>
+        <div class="tree-controls">
+          <button id="expand-all-btn">Expand All</button>
+          <button id="collapse-all-btn">Collapse All</button>
+        </div>
+      </div>
+      <div class="component-tree-container" id="component-tree-container"></div>
+    </div>
+
+    <!-- 4. Data Flow -->
+    <div id="data-flow" class="tab-panel">
+      <div class="data-flow-header">
+        <h3>Parameters &amp; Data</h3>
+        <input type="text" id="property-search" placeholder="Filter parameters…">
+      </div>
+      <div class="property-list" id="property-list"></div>
+    </div>
+
+    <!-- 5. Documentation -->
+    <div id="doc-view" class="tab-panel">
+      <div class="doc-view-header"><h3>Endpoint Documentation</h3></div>
+      <div id="doc-content" class="doc-content"></div>
+    </div>
+
+  </div><!-- /tab-content -->
+
+  <!-- Detail Sidebar -->
+  <div class="detail-sidebar" id="detail-sidebar">
+    <div class="sidebar-header">
+      <h3 id="sidebar-title">Detail</h3>
+      <button class="close-btn" id="close-sidebar">✕</button>
+    </div>
+    <div class="sidebar-content" id="sidebar-content"></div>
+  </div>
+
+</div><!-- /flow-analyzer-container -->
+
+<!-- Injected by extension: window.DIAGRAM_SRC and window.ENDPOINT -->
+{{initialData}}
+
+<script src="{{scriptUri}}"></script>
+</body>
+</html>
