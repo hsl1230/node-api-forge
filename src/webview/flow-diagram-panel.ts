@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { formatEndpointDisplayLabel } from '../discovery/endpoint-display';
+import { detectExternalCalls, ExternalCall } from '../discovery/analyzer/external-call-analyzer';
 import { ApiEndpoint, SourceLocation } from '../discovery/types';
 
 interface PathAliasEntry {
@@ -42,6 +43,7 @@ export class FlowDiagramPanel {
   private readonly onHardRefresh?: (endpoint: ApiEndpoint) => Promise<ApiEndpoint | undefined>;
   private endpoint: ApiEndpoint;
   private disposables: vscode.Disposable[] = [];
+  private docsAbortController?: vscode.CancellationTokenSource;
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -55,7 +57,7 @@ export class FlowDiagramPanel {
     this.onHardRefresh = onHardRefresh;
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.webview.onDidReceiveMessage(
-      async (msg: { command: string; filePath?: string; line?: number }) => {
+      async (msg: { command: string; filePath?: string; line?: number; content?: string; format?: string }) => {
         if (msg.command === 'navigateTo' && msg.filePath) {
           await navigateToSource(msg.filePath, msg.line ?? 1);
           return;
@@ -73,6 +75,21 @@ export class FlowDiagramPanel {
 
         if (msg.command === 'testEndpoint') {
           await this.handleTestEndpoint();
+          return;
+        }
+
+        if (msg.command === 'generateDocs') {
+          await this.handleGenerateDocs();
+          return;
+        }
+
+        if (msg.command === 'exportSvg' && msg.content) {
+          await this.handleExportDiagram(msg.content, 'svg');
+          return;
+        }
+
+        if (msg.command === 'exportPng' && msg.content) {
+          await this.handleExportDiagram(msg.content, 'png');
         }
       },
       null,
@@ -147,6 +164,80 @@ export class FlowDiagramPanel {
 
   private async handleTestEndpoint(): Promise<void> {
     await vscode.commands.executeCommand('nodeApiForge.openEndpointInHttpForge', this.endpoint);
+  }
+
+  private async handleGenerateDocs(): Promise<void> {
+    this.docsAbortController?.cancel();
+    this.docsAbortController = new vscode.CancellationTokenSource();
+    const token = this.docsAbortController.token;
+
+    try {
+      const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+      if (models.length === 0) {
+        await this.panel.webview.postMessage({ command: 'docsError', message: 'GitHub Copilot language model not available.' });
+        return;
+      }
+
+      const ep = this.endpoint;
+      const route = ep.resolvedPath ?? ep.pathExpression;
+      const params = (ep.parameters ?? []).map((p) => `  - ${p.name} (${p.location}${p.required ? ', required' : ''}): ${p.type ?? 'unknown'}`).join('\n');
+      const middleware = (ep.middleware ?? []).map((m) => `  - ${m.name}`).join('\n');
+
+      const prompt = [
+        `Generate concise API endpoint documentation in Markdown for the following endpoint:`,
+        ``,
+        `**Method:** ${ep.method}`,
+        `**Path:** ${route}`,
+        `**Framework:** ${ep.framework}`,
+        `**Handler:** ${ep.handlerLocation.filePath}:${ep.handlerLocation.line}`,
+        params ? `**Parameters:**\n${params}` : `**Parameters:** none`,
+        middleware ? `**Middleware:**\n${middleware}` : `**Middleware:** none`,
+        ``,
+        `Include: a one-paragraph description of the endpoint's likely purpose, a summary table of parameters with Name/In/Type/Required/Description columns, and any notes about the middleware chain.`,
+        `Keep the response under 400 words. Use Markdown formatting.`
+      ].join('\n');
+
+      await this.panel.webview.postMessage({ command: 'docsStart' });
+
+      const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+      const response = await models[0].sendRequest(messages, {}, token);
+
+      let fullText = '';
+      for await (const fragment of response.text) {
+        if (token.isCancellationRequested) break;
+        fullText += fragment;
+        await this.panel.webview.postMessage({ command: 'docsChunk', text: fragment });
+      }
+
+      await this.panel.webview.postMessage({ command: 'docsDone', text: fullText });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.panel.webview.postMessage({ command: 'docsError', message });
+    }
+  }
+
+  private async handleExportDiagram(content: string, format: 'svg' | 'png'): Promise<void> {
+    const defaultName = `flow-diagram.${format}`;
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(defaultName),
+      filters: format === 'svg'
+        ? { 'SVG Image': ['svg'] }
+        : { 'PNG Image': ['png'] }
+    });
+
+    if (!uri) return;
+
+    if (format === 'svg') {
+      const buffer = Buffer.from(content, 'utf8');
+      await vscode.workspace.fs.writeFile(uri, buffer);
+    } else {
+      // PNG comes as base64 data URL: "data:image/png;base64,..."
+      const base64 = content.replace(/^data:image\/png;base64,/, '');
+      const buffer = Buffer.from(base64, 'base64');
+      await vscode.workspace.fs.writeFile(uri, buffer);
+    }
+
+    vscode.window.showInformationMessage(`Flow diagram exported to ${uri.fsPath}`);
   }
 
   private dispose(): void {
@@ -795,7 +886,12 @@ function buildWebviewHtml(endpoint: ApiEndpoint, webview: vscode.Webview, resour
 
   const diagram = buildMermaidDiagram(endpoint);
   const componentGraph = buildComponentGraph(endpoint);
-  const initialData = `<script>window.DIAGRAM_SRC = ${JSON.stringify(diagram)};window.ENDPOINT = ${JSON.stringify(endpoint)};window.COMPONENT_GRAPH = ${JSON.stringify(componentGraph)};</script>`;
+  const allFiles = [
+    ...componentGraph.rootFiles,
+    ...Object.keys(componentGraph.childrenByFile)
+  ];
+  const externalCalls: ExternalCall[] = detectExternalCalls([...new Set(allFiles)]);
+  const initialData = `<script>window.DIAGRAM_SRC = ${JSON.stringify(diagram)};window.ENDPOINT = ${JSON.stringify(endpoint)};window.COMPONENT_GRAPH = ${JSON.stringify(componentGraph)};window.EXTERNAL_CALLS = ${JSON.stringify(externalCalls)};</script>`;
 
   html = html.replace(/\{\{cspSource\}\}/g, webview.cspSource);
   html = html.replace('{{styleUri}}',    styleUri.toString());

@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.0.4 2026-07-09
+
+### Added
+
+- AWS Lambda (raw handler) support as a new `lambda` framework. Endpoints are discovered from Serverless Framework (`serverless.yml`) and AWS SAM (`template.yaml` / `template.json`) config files. Projects using `express`+`serverless-http` or `fastify`+`@fastify/aws-lambda` continue to be handled by the existing Express and Fastify providers unchanged.
+- Lambda component analyzer: extracts parameters from `event.pathParameters`, `event.queryStringParameters`, `event.headers`, and `event.body` accesses inside handler bodies.
+- Middy middleware detection: `.use()` plugin chains are captured as endpoint middleware.
+- Handler-scan fallback: when no config file is present, exported Lambda handlers are discovered with `confidence: low` and an unknown-path warning.
+- `"lambda"` added to the `nodeApiForge.frameworks` setting enum.
+
 ## 0.0.3 2026-07-08
 
 ### Added

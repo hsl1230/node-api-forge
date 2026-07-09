@@ -5,3 +5,7 @@ export const EXPORT_COMMAND_ID = 'nodeApiForge.exportDiscoveredCollection';
 export const OPEN_HTTP_FORGE_COMMAND_ID = 'nodeApiForge.openEndpointInHttpForge';
 export const SHOW_FLOW_COMMAND_ID = 'nodeApiForge.showEndpointFlow';
 export const HARD_REFRESH_WORKSPACE_COMMAND_ID = 'nodeApiForge.hardRefreshWorkspace';
+export const SEARCH_IN_ENDPOINT_COMMAND_ID = 'nodeApiForge.searchInEndpoint';
+export const EXPORT_PROJECT_COMMAND_ID = 'nodeApiForge.exportProjectCollection';
+export const EXPORT_FRAMEWORK_COMMAND_ID = 'nodeApiForge.exportFrameworkCollection';
+export const GO_TO_TEST_FILE_COMMAND_ID = 'nodeApiForge.goToTestFile';

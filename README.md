@@ -23,7 +23,7 @@ No app integration. No production risk. No Swagger dependencies. Just source-to-
 
 Node API Forge eliminates Swagger UI integration overhead by discovering endpoints directly from your Node.js source code and generating organized [HTTP Forge](https://marketplace.visualstudio.com/items?itemName=henry-huang.http-forge) workflows for testing, documentation, and automation—without adding app dependencies or production security risks.
 
-Supported frameworks: Express, NestJS, and Fastify.
+Supported frameworks: Express, NestJS, Fastify, and AWS Lambda (raw handlers).
 
 ## Start In 60 Seconds
 
@@ -47,7 +47,7 @@ Supported frameworks: Express, NestJS, and Fastify.
 
 ## Why Teams Use It
 
-- Discover Express, NestJS, and Fastify endpoints directly from source instead of manually curating requests.
+- Discover Express, NestJS, Fastify, and AWS Lambda endpoints directly from source instead of manually curating requests.
 - Open endpoints in HTTP Forge with method, path, params, headers, and body context already mapped.
 - Browse APIs in a scalable explorer hierarchy (project -> framework -> endpoint), with automatic framework paging for very large endpoint sets.
 - Trace endpoint flow across 5 tabs: Mermaid flow diagram, ordered middleware chain, component tree, parameter data flow with click-to-source navigation, and a documentation/HTTP snippet view.
@@ -84,7 +84,7 @@ Supported frameworks: Express, NestJS, and Fastify.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `nodeApiForge.frameworks` | `string[]` | `["auto"]` | Framework hints for discovery in mixed projects (`auto`, `express`, `fastify`, `nestjs`). |
+| `nodeApiForge.frameworks` | `string[]` | `["auto"]` | Framework hints for discovery in mixed projects (`auto`, `express`, `fastify`, `nestjs`, `lambda`). Lambda activates only when Express and Fastify are absent. |
 | `nodeApiForge.customSeedLoaderModulePath` | `string` | `""` | Optional JS module that exports `loadSeedManifestEndpoints(projectRoot, context)`. |
 | `nodeApiForge.contextProperties` | `string[]` | `["locals"]` | Shared context sub-properties to track on inferred request/response roots (for example `["locals", "context"]`). |
 | `nodeApiForge.autoRefreshOnFileChanges` | `boolean` | `true` | Automatically reruns discovery on relevant source/config changes. |

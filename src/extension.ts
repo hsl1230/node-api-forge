@@ -1,26 +1,31 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import {
     COPY_ENDPOINT_REQUEST_COMMAND_ID,
     DISCOVER_APIS_COMMAND_ID,
     EXPORT_COMMAND_ID,
+    EXPORT_FRAMEWORK_COMMAND_ID,
+    EXPORT_PROJECT_COMMAND_ID,
+    GO_TO_TEST_FILE_COMMAND_ID,
     HARD_REFRESH_WORKSPACE_COMMAND_ID,
     OPEN_ENDPOINT_SOURCE_COMMAND_ID,
     OPEN_HTTP_FORGE_COMMAND_ID,
+    SEARCH_IN_ENDPOINT_COMMAND_ID,
     SHOW_FLOW_COMMAND_ID
 } from './commands';
-import { ApiEndpoint, createDefaultDiscoveryEngine } from './discovery';
+import { ApiEndpoint, ApiFramework, createDefaultDiscoveryEngine } from './discovery';
 import { ApiExplorerTreeProvider } from './discovery/api-explorer-tree-provider';
 import { formatEndpointDisplayLabel } from './discovery/endpoint-display';
 import { FrameworkDetector } from './discovery/framework-detector';
 import { resolveProjectName } from './discovery/project-name';
 import { collectSourceFiles } from './discovery/source-files';
-import { serializeHttpForgeCollection } from './export/http-forge-collection';
+import { serializeHttpForgeCollection, serializeScopedFrameworkCollection, serializeScopedProjectCollection } from './export/http-forge-collection';
 import { FlowDiagramPanel } from './webview/flow-diagram-panel';
 
 const HTTP_FORGE_EXTENSION_ID = 'henry-huang.http-forge';
 const FRAMEWORK_CACHE_PREFIX = 'frameworkCache:';
-const SUPPORTED_FRAMEWORKS = new Set(['express', 'fastify', 'nestjs'] as const);
+const SUPPORTED_FRAMEWORKS = new Set(['express', 'fastify', 'nestjs', 'lambda'] as const);
 const FEW_ENDPOINTS_THRESHOLD = 2;
 
 interface HttpForgeApi {
@@ -133,9 +138,13 @@ export function activate(context: vscode.ExtensionContext): void {
     const endpointName = formatEndpointDisplayLabel(endpoint);
     const projectName = getEndpointProjectName(endpoint);
     const baseUrlVariableName = getProjectBaseUrlVariableName(projectName);
+
+    const gitBranch = await getGitBranch();
+    const ticketMatch = gitBranch?.match(/([A-Z]+-\d+)/);
+    const branchGroup = ticketMatch ? ` [${ticketMatch[1]}]` : '';
     const collectionName = projectName
-      ? projectName
-      : 'Node API Forge Discovery';
+      ? `${projectName}${branchGroup}`
+      : `Node API Forge Discovery${branchGroup}`;
 
     const title = `Node API: ${endpointName}`;
 
@@ -232,6 +241,116 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.showInformationMessage(`Node API Forge: Exported discovered collection to ${saveUri.fsPath}`);
   });
 
+  const searchInEndpoint = vscode.commands.registerCommand(SEARCH_IN_ENDPOINT_COMMAND_ID, async (arg?: unknown) => {
+    const endpoint = resolveEndpointCommandArg(arg);
+    if (!endpoint) {
+      vscode.window.showWarningMessage('Node API Forge: No endpoint selected for search.');
+      return;
+    }
+    FlowDiagramPanel.show(endpoint, context.extensionUri, async (currentEndpoint) => {
+      const refreshedEndpoint = await hardRefreshEndpoint(currentEndpoint);
+      return refreshedEndpoint ?? currentEndpoint;
+    });
+    // Give the panel a moment to open, then trigger search
+    setTimeout(() => {
+      vscode.commands.executeCommand('nodeApiForge.searchInEndpoint._internal', endpoint);
+    }, 300);
+  });
+
+  const exportProjectCollection = vscode.commands.registerCommand(EXPORT_PROJECT_COMMAND_ID, async (arg?: unknown) => {
+    const result = explorerProvider.getLastResult();
+    if (!result) {
+      vscode.window.showWarningMessage('Node API Forge: Run discovery before exporting a collection.');
+      return;
+    }
+
+    const nodeData = (arg && typeof arg === 'object' && 'data' in arg)
+      ? (arg as { data?: { kind: string; projectName?: string } }).data
+      : undefined;
+    const projectName = nodeData?.kind === 'project' ? nodeData.projectName : undefined;
+    if (!projectName) {
+      vscode.window.showWarningMessage('Node API Forge: Could not determine project name.');
+      return;
+    }
+
+    const saveUri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(`${projectName.replace(/[^a-zA-Z0-9-_]/g, '-')}-collection.forge.json`),
+      filters: { 'HTTP Forge JSON': ['json', 'forge.json'] },
+      title: `Export ${projectName} Collection`
+    });
+    if (!saveUri) return;
+
+    const payload = serializeScopedProjectCollection(result, projectName, {
+      projectRoots: lastDiscoveryContext?.projectRoots ?? []
+    });
+    await vscode.workspace.fs.writeFile(saveUri, Buffer.from(payload, 'utf8'));
+    vscode.window.showInformationMessage(`Node API Forge: Exported ${projectName} collection to ${saveUri.fsPath}`);
+  });
+
+  const exportFrameworkCollection = vscode.commands.registerCommand(EXPORT_FRAMEWORK_COMMAND_ID, async (arg?: unknown) => {
+    const result = explorerProvider.getLastResult();
+    if (!result) {
+      vscode.window.showWarningMessage('Node API Forge: Run discovery before exporting a collection.');
+      return;
+    }
+
+    const nodeData = (arg && typeof arg === 'object' && 'data' in arg)
+      ? (arg as { data?: { kind: string; projectName?: string; framework?: ApiFramework } }).data
+      : undefined;
+
+    // frameworkGroup items carry `{ kind: 'framework', framework, endpoints }` in `data`
+    // But they're nested under a project item. We need to reconstruct the projectName
+    // by looking up what project this framework belongs to.
+    // Fallback: use getEndpointProjectName from first endpoint.
+    const frameworkFromData = nodeData?.kind === 'framework' ? nodeData.framework : undefined;
+    if (!frameworkFromData) {
+      vscode.window.showWarningMessage('Node API Forge: Could not determine framework.');
+      return;
+    }
+
+    // Get project name from the framework group's endpoints via parent context
+    // Since we don't have direct access to parent, derive from the first endpoint in the filtered result
+    const frameworkEndpoints = result.endpoints.filter((ep) => ep.framework === frameworkFromData);
+    if (frameworkEndpoints.length === 0) {
+      vscode.window.showWarningMessage('Node API Forge: No endpoints found for this framework.');
+      return;
+    }
+    const projectName = resolveProjectName(frameworkEndpoints[0], lastDiscoveryContext?.projectRoots ?? []) ?? 'Unmapped Project';
+
+    const saveUri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(`${projectName.replace(/[^a-zA-Z0-9-_]/g, '-')}-${frameworkFromData}.forge.json`),
+      filters: { 'HTTP Forge JSON': ['json', 'forge.json'] },
+      title: `Export ${projectName} – ${frameworkFromData.toUpperCase()} Collection`
+    });
+    if (!saveUri) return;
+
+    const payload = serializeScopedFrameworkCollection(result, projectName, frameworkFromData, {
+      projectRoots: lastDiscoveryContext?.projectRoots ?? []
+    });
+    await vscode.workspace.fs.writeFile(saveUri, Buffer.from(payload, 'utf8'));
+    vscode.window.showInformationMessage(`Node API Forge: Exported ${frameworkFromData.toUpperCase()} collection to ${saveUri.fsPath}`);
+  });
+
+  const goToTestFile = vscode.commands.registerCommand(GO_TO_TEST_FILE_COMMAND_ID, async (arg?: unknown) => {
+    const endpoint = resolveEndpointCommandArg(arg);
+    if (!endpoint) {
+      vscode.window.showWarningMessage('Node API Forge: No endpoint selected.');
+      return;
+    }
+
+    const handlerFile = endpoint.handlerLocation.filePath;
+    const testFile = await findTestFile(handlerFile);
+    if (!testFile) {
+      vscode.window.showWarningMessage(
+        `Node API Forge: No test file found for ${path.basename(handlerFile)}. Expected patterns: *.test.ts, *.spec.ts, __tests__/*.ts`
+      );
+      return;
+    }
+
+    const document = await vscode.workspace.openTextDocument(testFile);
+    await vscode.window.showTextDocument(document, { preview: false });
+  });
+
   const watcher = vscode.workspace.createFileSystemWatcher('**/*.{ts,js,mjs,cjs,cts,mts,json}');
   const onFileEvent = (kind: AutoRefreshEventKind, uri: vscode.Uri): void => {
     if (!lastSelection || !isAutoRefreshEnabled()) {
@@ -266,6 +385,10 @@ export function activate(context: vscode.ExtensionContext): void {
     showEndpointFlow,
     hardRefreshWorkspace,
     exportDiscoveredCollection,
+    searchInEndpoint,
+    exportProjectCollection,
+    exportFrameworkCollection,
+    goToTestFile,
     watcher,
     configWatcher,
     output,
@@ -715,23 +838,79 @@ export function deactivate(): void {
   // No-op for now.
 }
 
+/** Get the current git branch name using the VS Code git extension API. */
+async function getGitBranch(): Promise<string | undefined> {
+  try {
+    const gitExtension = vscode.extensions.getExtension('vscode.git');
+    if (!gitExtension) return undefined;
+    const gitApi = gitExtension.isActive ? gitExtension.exports : await gitExtension.activate();
+    const api = gitApi?.getAPI?.(1);
+    if (!api) return undefined;
+    const repos = api.repositories as Array<{ state: { HEAD?: { name?: string } } }>;
+    if (!repos || repos.length === 0) return undefined;
+    return repos[0].state.HEAD?.name;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Given a handler file path, try to find a co-located test file.
+ * Searches common test patterns: *.test.ts, *.spec.ts, __tests__/*, test/*.
+ */
+async function findTestFile(handlerFilePath: string): Promise<string | undefined> {
+  const dir = path.dirname(handlerFilePath);
+  const base = path.basename(handlerFilePath, path.extname(handlerFilePath));
+  const ext = path.extname(handlerFilePath);
+
+  const candidates = [
+    path.join(dir, `${base}.test${ext}`),
+    path.join(dir, `${base}.spec${ext}`),
+    path.join(dir, `${base}.test.ts`),
+    path.join(dir, `${base}.spec.ts`),
+    path.join(dir, `${base}.test.js`),
+    path.join(dir, `${base}.spec.js`),
+    path.join(dir, '__tests__', `${base}.test${ext}`),
+    path.join(dir, '__tests__', `${base}.spec${ext}`),
+    path.join(dir, '__tests__', `${base}${ext}`),
+    path.join(dir, '..', '__tests__', `${base}.test${ext}`),
+    path.join(dir, '..', '__tests__', `${base}.spec${ext}`),
+    path.join(dir, '..', 'test', `${base}.test${ext}`),
+    path.join(dir, '..', 'test', `${base}.spec${ext}`),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  // Broader search using VS Code file search
+  const results = await vscode.workspace.findFiles(
+    `**/${base}.{test,spec}.{ts,js,tsx,jsx}`,
+    '**/node_modules/**',
+    1
+  );
+  return results[0]?.fsPath;
+}
+
 async function resolveFrameworksByProjectRoot(
   projectRoots: string[],
   configuredFrameworks: string[],
   frameworkDetector: FrameworkDetector,
   workspaceState: vscode.Memento
-): Promise<Record<string, Array<'express' | 'fastify' | 'nestjs' | 'unknown'>>> {
+): Promise<Record<string, ApiFramework[]>> {
   const { explicit, includeAuto } = parseConfiguredFrameworks(configuredFrameworks);
   if (!includeAuto && explicit.length > 0) {
     return Object.fromEntries(projectRoots.map((projectRoot) => [projectRoot, explicit]));
   }
 
-  const resolved: Record<string, Array<'express' | 'fastify' | 'nestjs' | 'unknown'>> = {};
+  const resolved: Record<string, ApiFramework[]> = {};
   for (const projectRoot of projectRoots) {
     const cacheKey = `${FRAMEWORK_CACHE_PREFIX}${projectRoot}`;
     const fingerprint = frameworkDetector.buildFingerprint(projectRoot);
     const packageJsonMtimeMs = getPackageJsonMtimeMs(fingerprint.packageJsonPath);
-    const cached = workspaceState.get<{ packageJsonMtimeMs: number | null; frameworks: Array<'express' | 'fastify' | 'nestjs' | 'unknown'> }>(cacheKey);
+    const cached = workspaceState.get<{ packageJsonMtimeMs: number | null; frameworks: ApiFramework[] }>(cacheKey);
 
     if (cached && cached.packageJsonMtimeMs === packageJsonMtimeMs && cached.frameworks.length > 0) {
       resolved[projectRoot] = mergeFrameworkLists(cached.frameworks, explicit);
@@ -749,16 +928,17 @@ async function resolveFrameworksByProjectRoot(
   return resolved;
 }
 
-function normalizeConfiguredFrameworks(configuredFrameworks: string[]): Array<'express' | 'fastify' | 'nestjs' | 'unknown'> {
+function normalizeConfiguredFrameworks(configuredFrameworks: string[]): ApiFramework[] {
   const normalized = configuredFrameworks.map((item) => item.toLowerCase());
+  const validFrameworks = new Set<ApiFramework>(['express', 'fastify', 'nestjs', 'lambda', 'unknown']);
   const selected = normalized
-    .filter((item): item is 'express' | 'fastify' | 'nestjs' => SUPPORTED_FRAMEWORKS.has(item as 'express' | 'fastify' | 'nestjs'));
+    .filter((item): item is ApiFramework => validFrameworks.has(item as ApiFramework));
 
   return Array.from(new Set(selected));
 }
 
 function parseConfiguredFrameworks(configuredFrameworks: string[]): {
-  explicit: Array<'express' | 'fastify' | 'nestjs' | 'unknown'>;
+  explicit: ApiFramework[];
   includeAuto: boolean;
 } {
   const normalized = configuredFrameworks.map((item) => item.toLowerCase());
@@ -769,9 +949,9 @@ function parseConfiguredFrameworks(configuredFrameworks: string[]): {
 }
 
 function mergeFrameworkLists(
-  detected: Array<'express' | 'fastify' | 'nestjs' | 'unknown'>,
-  explicit: Array<'express' | 'fastify' | 'nestjs' | 'unknown'>
-): Array<'express' | 'fastify' | 'nestjs' | 'unknown'> {
+  detected: ApiFramework[],
+  explicit: ApiFramework[]
+): ApiFramework[] {
   return Array.from(new Set([...detected, ...explicit]));
 }
 

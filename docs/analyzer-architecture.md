@@ -2,7 +2,7 @@
 
 ## Overview
 
-Node API Forge uses framework-specific providers for Express, NestJS, and Fastify with a shared discovery engine. The architecture already separates route discovery from cross-cutting concerns such as endpoint grouping, parameter enrichment, export shaping, and incremental cache reuse.
+Node API Forge uses framework-specific providers for Express, NestJS, Fastify, and AWS Lambda with a shared discovery engine. The architecture already separates route discovery from cross-cutting concerns such as endpoint grouping, parameter enrichment, export shaping, and incremental cache reuse.
 
 The core responsibilities are split across:
 
@@ -43,6 +43,16 @@ The core responsibilities are split across:
 │  │ - controller + method    │  │ - path joining / placeholder logic  │ │
 │  │ - route normalization     │  │ - handler location resolution       │ │
 │  └──────────────────────────┘  └─────────────────────────────────────┘ │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ LambdaDiscoveryProvider (last-resort — activates only when       │  │
+│  │ Express and Fastify are absent)                                  │  │
+│  │ - serverless.yml / SAM template.yaml config parsing             │  │
+│  │ - handler file resolution from config references                │  │
+│  │ - event.* parameter extraction (path/query/header/body)         │  │
+│  │ - Middy middleware unwrapping                                   │  │
+│  │ - handler-scan fallback when no config file found               │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -112,6 +122,7 @@ Current implementation entry points:
 - [Express provider](../src/discovery/providers/express-discovery-provider.ts)
 - [Fastify provider](../src/discovery/providers/fastify-discovery-provider.ts)
 - [Nest provider](../src/discovery/providers/nest-discovery-provider.ts)
+- [Lambda provider](../src/discovery/providers/lambda-discovery-provider.ts)
 
 ## Extension Points
 

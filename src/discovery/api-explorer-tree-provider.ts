@@ -174,7 +174,7 @@ function groupByFramework(endpoints: ApiEndpoint[]): Record<ApiFramework, ApiEnd
       acc[endpoint.framework].push(endpoint);
       return acc;
     },
-    { express: [], nestjs: [], fastify: [], unknown: [] } as Record<ApiFramework, ApiEndpoint[]>
+    { express: [], nestjs: [], fastify: [], lambda: [], unknown: [] } as Record<ApiFramework, ApiEndpoint[]>
   );
 }
 

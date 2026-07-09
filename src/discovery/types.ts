@@ -1,4 +1,4 @@
-export type ApiFramework = 'express' | 'nestjs' | 'fastify' | 'unknown';
+export type ApiFramework = 'express' | 'nestjs' | 'fastify' | 'lambda' | 'unknown';
 
 export type EndpointConfidence = 'high' | 'medium' | 'low';
 

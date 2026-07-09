@@ -16,6 +16,8 @@ const state = {
   pan: { x: 0, y: 0, dragging: false, startX: 0, startY: 0 },
   expandedNodes: new Set(),
   diagramNodeMeta: {},
+  hideSysMiddleware: false,
+  docsAccumulatedText: '',
   sidebar: {
     history: [],
     current: null
@@ -36,10 +38,14 @@ document.addEventListener('DOMContentLoaded', () => {
   renderMiddlewareChain();
   renderComponentTree();
   renderDataFlow();
+  renderExternalCalls();
   renderDocumentation();
   setupZoomControls();
   setupSearch();
   setupSidebar();
+  setupDiagramExport();
+  setupSystemMiddlewareToggle();
+  setupDocGeneration();
   document.getElementById('search-btn')?.addEventListener('click', onSearchClick);
   document.getElementById('test-btn')?.addEventListener('click', onTestClick);
   document.getElementById('refresh-btn')?.addEventListener('click', onHardRefreshClick);
@@ -56,21 +62,37 @@ function onTestClick() {
 
 window.addEventListener('message', event => {
   const message = event.data;
-  if (!message || message.command !== 'hardRefreshDone') {
+  if (!message) return;
+
+  if (message.command === 'hardRefreshDone') {
+    if (!message.success) {
+      const button = document.getElementById('refresh-btn');
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = false;
+        button.textContent = button.dataset.originalLabel || '🔄 Refresh Endpoint';
+      }
+    }
     return;
   }
 
-  if (message.success) {
+  if (message.command === 'docsStart') {
+    onDocsStart();
     return;
   }
 
-  const button = document.getElementById('refresh-btn');
-  if (!(button instanceof HTMLButtonElement)) {
+  if (message.command === 'docsChunk') {
+    onDocsChunk(message.text || '');
     return;
   }
 
-  button.disabled = false;
-  button.textContent = button.dataset.originalLabel || '🔄 Refresh Endpoint';
+  if (message.command === 'docsDone') {
+    onDocsDone(message.text || '');
+    return;
+  }
+
+  if (message.command === 'docsError') {
+    onDocsError(message.message || 'Unknown error');
+  }
 });
 
 function onHardRefreshClick(event) {
@@ -257,6 +279,7 @@ function buildFlowDiagramModel() {
   const graph = window.COMPONENT_GRAPH || {};
   const lines = ['flowchart TD'];
   const nodeMeta = {};
+  const hideSysMiddleware = state.hideSysMiddleware === true;
 
   const route = endpoint.resolvedPath || endpoint.pathExpression || '/';
   const endpointLabel = formatEndpointLabel(endpoint, route);
@@ -274,7 +297,11 @@ function buildFlowDiagramModel() {
   nodeMeta.REQ = { type: 'request' };
   nodeMeta.HANDLER = { type: 'handler' };
 
-  const middleware = endpoint.middleware || [];
+  const allMiddleware = endpoint.middleware || [];
+  const middleware = hideSysMiddleware
+    ? allMiddleware.filter((mw) => !isSystemMiddleware(mw))
+    : allMiddleware;
+
   const handlerPath = normalizeFsPath(handlerLocation.filePath || '');
   const params = endpoint.parameters || [];
   const edgeParts = [
@@ -1279,4 +1306,205 @@ function escAttrOnclick(s) {
 }
 function escAttr(s) {
   return String(s ?? '').replace(/"/g, '&quot;');
+}
+
+// ── System Middleware detection ───────────────────────────────────────────────
+const SYSTEM_MIDDLEWARE_NAMES = new Set([
+  'cors', 'helmet', 'morgan', 'compression', 'bodyparser', 'body-parser',
+  'cookieparser', 'cookie-parser', 'methodoverride', 'method-override',
+  'express-session', 'session', 'csurf', 'csrf', 'serve-static',
+  'multer', 'busboy', 'express-validator', 'celebrate', 'joi',
+  'passport', 'passport-local', 'express-rate-limit', 'rate-limit',
+  'hpp', 'express-mongo-sanitize', 'xss-clean', 'express-fileupload'
+]);
+
+function isSystemMiddleware(mw) {
+  const name = String(mw.name || '').toLowerCase().replace(/\\/g, '/');
+  const shortName = name.split('/').pop() || name;
+  if (name.includes('node_modules')) return true;
+  const baseName = shortName.replace(/\.\w+$/, '');
+  return SYSTEM_MIDDLEWARE_NAMES.has(baseName) || SYSTEM_MIDDLEWARE_NAMES.has(name);
+}
+
+function setupSystemMiddlewareToggle() {
+  const checkbox = document.getElementById('hide-sys-middleware');
+  if (!(checkbox instanceof HTMLInputElement)) return;
+  checkbox.addEventListener('change', () => {
+    state.hideSysMiddleware = checkbox.checked;
+    renderMermaidDiagram();
+  });
+}
+
+// ── SVG / PNG Export ──────────────────────────────────────────────────────────
+function setupDiagramExport() {
+  document.getElementById('export-svg-btn')?.addEventListener('click', exportSvg);
+  document.getElementById('export-png-btn')?.addEventListener('click', exportPng);
+}
+
+function exportSvg() {
+  const svgEl = document.querySelector('#diagram-viewport svg');
+  if (!svgEl) { alert('No diagram to export yet.'); return; }
+  const content = new XMLSerializer().serializeToString(svgEl);
+  vscode.postMessage({ command: 'exportSvg', content });
+}
+
+function exportPng() {
+  const svgEl = document.querySelector('#diagram-viewport svg');
+  if (!svgEl) { alert('No diagram to export yet.'); return; }
+
+  const svgData = new XMLSerializer().serializeToString(svgEl);
+  const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(svgBlob);
+
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    const scale = window.devicePixelRatio || 2;
+    canvas.width = (img.width || 800) * scale;
+    canvas.height = (img.height || 600) * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#1e1e1e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+    const content = canvas.toDataURL('image/png');
+    vscode.postMessage({ command: 'exportPng', content });
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); alert('PNG export failed.'); };
+  img.src = url;
+}
+
+// ── External Calls tab ────────────────────────────────────────────────────────
+function renderExternalCalls() {
+  const container = document.getElementById('ext-calls-list');
+  if (!container) return;
+
+  const calls = window.EXTERNAL_CALLS || [];
+  if (calls.length === 0) {
+    container.innerHTML = '<div class="empty-group" style="padding:20px;color:var(--text-muted)">No external calls detected in the component tree.</div>';
+    return;
+  }
+
+  const typeGroups = new Map();
+  calls.forEach(call => {
+    if (!typeGroups.has(call.type)) typeGroups.set(call.type, []);
+    typeGroups.get(call.type).push(call);
+  });
+
+  const typeIcons = { http: '🌐', database: '🗄️', cache: '⚡', queue: '📨', storage: '📦' };
+  const typeLabels = { http: 'HTTP Calls', database: 'Database Queries', cache: 'Cache Access', queue: 'Message Queue', storage: 'Cloud Storage' };
+
+  const html = Array.from(typeGroups.entries()).map(([type, items]) => {
+    const icon = typeIcons[type] || '📡';
+    const label = typeLabels[type] || type.toUpperCase();
+    const rows = items.map(call => `
+      <div class="param-row ext-call-row" data-file="${escAttr(call.filePath)}" data-client="${escAttr(call.client)}">
+        <span class="param-name" style="color:#9cdcfe">${escHtml(call.client)}</span>
+        <span class="param-type" style="font-family:monospace;font-size:11px">${escHtml(shortPath(call.filePath))}:${call.line}</span>
+        <span class="param-desc" style="font-family:monospace;font-size:11px;color:var(--text-muted)">${escHtml(call.snippet)}</span>
+        <span style="cursor:pointer;color:var(--accent-blue);font-size:11px" onclick="navigate('${escAttrOnclick(call.filePath)}',${call.line})">→ open</span>
+      </div>`).join('');
+    return `
+      <div class="param-group">
+        <div class="param-group-header">
+          <span>${icon}</span>
+          <span class="param-group-title">${label}</span>
+          <span class="param-group-count">${items.length}</span>
+          <span class="param-group-chevron">▶</span>
+        </div>
+        <div class="param-group-body" style="display:none;">${rows}</div>
+      </div>`;
+  }).join('');
+
+  container.innerHTML = html;
+
+  container.querySelectorAll('.param-group-header').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      const body = hdr.nextElementSibling;
+      if (!body) return;
+      const open = body.style.display !== 'none';
+      body.style.display = open ? 'none' : '';
+      const chev = hdr.querySelector('.param-group-chevron');
+      if (chev) chev.textContent = open ? '▶' : '▼';
+    });
+  });
+
+  const filterInput = document.getElementById('ext-call-filter');
+  filterInput?.addEventListener('input', () => {
+    const q = (filterInput.value || '').toLowerCase();
+    container.querySelectorAll('.ext-call-row').forEach(row => {
+      const file = (row.dataset.file || '').toLowerCase();
+      const client = (row.dataset.client || '').toLowerCase();
+      row.style.display = (!q || file.includes(q) || client.includes(q)) ? '' : 'none';
+    });
+  });
+}
+
+// ── AI Documentation Generation ───────────────────────────────────────────────
+function setupDocGeneration() {
+  const btn = document.getElementById('generate-docs-btn');
+  btn?.addEventListener('click', () => {
+    vscode.postMessage({ command: 'generateDocs' });
+  });
+}
+
+function onDocsStart() {
+  const aiContent = document.getElementById('doc-ai-content');
+  const staticContent = document.getElementById('doc-content');
+  if (!aiContent || !staticContent) return;
+
+  state.docsAccumulatedText = '';
+  staticContent.style.display = 'none';
+  aiContent.style.display = '';
+  aiContent.innerHTML = '<div style="color:var(--text-muted);padding:16px">✨ Generating documentation…</div>';
+
+  const btn = document.getElementById('generate-docs-btn');
+  if (btn instanceof HTMLButtonElement) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating…';
+  }
+}
+
+function onDocsChunk(text) {
+  state.docsAccumulatedText += text;
+  const aiContent = document.getElementById('doc-ai-content');
+  if (aiContent) {
+    aiContent.innerHTML = `<div class="doc-section"><div class="doc-section-body"><div class="doc-description" style="white-space:pre-wrap;font-family:inherit">${escHtml(state.docsAccumulatedText)}</div></div></div>`;
+  }
+}
+
+function onDocsDone(fullText) {
+  state.docsAccumulatedText = fullText;
+  const aiContent = document.getElementById('doc-ai-content');
+  if (aiContent) {
+    aiContent.innerHTML = `<div class="doc-section"><div class="doc-section-body"><div class="doc-description" style="white-space:pre-wrap;font-family:inherit">${escHtml(fullText)}</div></div></div>
+      <div style="margin-top:12px;padding:0 16px">
+        <button id="show-static-docs-btn" style="font-size:12px;padding:4px 10px;cursor:pointer">↩ Show original docs</button>
+      </div>`;
+    document.getElementById('show-static-docs-btn')?.addEventListener('click', () => {
+      aiContent.style.display = 'none';
+      const staticContent = document.getElementById('doc-content');
+      if (staticContent) staticContent.style.display = '';
+    });
+  }
+  const btn = document.getElementById('generate-docs-btn');
+  if (btn instanceof HTMLButtonElement) {
+    btn.disabled = false;
+    btn.textContent = '✨ Regenerate';
+  }
+}
+
+function onDocsError(message) {
+  const aiContent = document.getElementById('doc-ai-content');
+  if (aiContent) {
+    aiContent.innerHTML = `<div style="color:#f88;padding:16px">⚠️ ${escHtml(message)}</div>`;
+  }
+  const staticContent = document.getElementById('doc-content');
+  if (staticContent) staticContent.style.display = '';
+  const btn = document.getElementById('generate-docs-btn');
+  if (btn instanceof HTMLButtonElement) {
+    btn.disabled = false;
+    btn.textContent = '✨ Generate with AI';
+  }
 }

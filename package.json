@@ -41,7 +41,10 @@
     "fastify",
     "middleware",
     "flow analysis",
-    "api discovery"
+    "api discovery",
+    "aws lambda",
+    "lambda",
+    "serverless"
   ],
   "engines": {
     "vscode": "^1.99.3"
@@ -97,6 +100,30 @@
         "title": "Hard Refresh Workspace",
         "category": "Node API Forge",
         "icon": "$(sync-ignored)"
+      },
+      {
+        "command": "nodeApiForge.searchInEndpoint",
+        "title": "Search in Endpoint Files",
+        "category": "Node API Forge",
+        "icon": "$(search)"
+      },
+      {
+        "command": "nodeApiForge.goToTestFile",
+        "title": "Go to Test File",
+        "category": "Node API Forge",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "nodeApiForge.exportProjectCollection",
+        "title": "Export Project Collection",
+        "category": "Node API Forge",
+        "icon": "$(export)"
+      },
+      {
+        "command": "nodeApiForge.exportFrameworkCollection",
+        "title": "Export Framework Collection",
+        "category": "Node API Forge",
+        "icon": "$(export)"
       }
     ],
     "viewsContainers": {
@@ -150,6 +177,22 @@
         {
           "command": "nodeApiForge.copyEndpointRequest",
           "when": "view == nodeApiForge.apiExplorer && viewItem == endpoint"
+        },
+        {
+          "command": "nodeApiForge.searchInEndpoint",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == endpoint"
+        },
+        {
+          "command": "nodeApiForge.goToTestFile",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == endpoint"
+        },
+        {
+          "command": "nodeApiForge.exportProjectCollection",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == projectGroup"
+        },
+        {
+          "command": "nodeApiForge.exportFrameworkCollection",
+          "when": "view == nodeApiForge.apiExplorer && viewItem == frameworkGroup"
         }
       ]
     },
@@ -164,7 +207,8 @@
               "auto",
               "express",
               "fastify",
-              "nestjs"
+              "nestjs",
+              "lambda"
             ]
           },
           "default": [

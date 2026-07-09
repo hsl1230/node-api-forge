@@ -64,7 +64,7 @@ export function buildHttpForgeCollection(result: DiscoveryResult, options: HttpF
       id: `project-${slugify(projectName)}`,
       name: projectName,
       description: `Endpoints discovered in project ${projectName}.`,
-      items: (['express', 'nestjs', 'fastify', 'unknown'] as ApiFramework[])
+      items: (['express', 'nestjs', 'fastify', 'lambda', 'unknown'] as ApiFramework[])
         .filter((framework) => frameworkGroups[framework].length > 0)
         .map((framework) => ({
           type: 'folder' as const,
@@ -93,7 +93,7 @@ function groupEndpointsByProjectAndFramework(
   for (const endpoint of endpoints) {
     const projectName = resolveProjectName(endpoint, projectRoots) ?? 'Unmapped Project';
     if (!grouped[projectName]) {
-      grouped[projectName] = { express: [], nestjs: [], fastify: [], unknown: [] };
+      grouped[projectName] = { express: [], nestjs: [], fastify: [], lambda: [], unknown: [] };
     }
     grouped[projectName][endpoint.framework].push(endpoint);
   }
@@ -104,7 +104,7 @@ function groupEndpointsByProjectAndFramework(
       .map(([projectName, frameworkGroups]) => [
         projectName,
         Object.fromEntries(
-          (['express', 'nestjs', 'fastify', 'unknown'] as ApiFramework[]).map((framework) => [
+          (['express', 'nestjs', 'fastify', 'lambda', 'unknown'] as ApiFramework[]).map((framework) => [
             framework,
             frameworkGroups[framework]
           ])
@@ -186,4 +186,45 @@ function slugify(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'item';
+}
+
+/** Export only the endpoints belonging to a single named project. */
+export function serializeScopedProjectCollection(
+  result: DiscoveryResult,
+  projectName: string,
+  options: HttpForgeCollectionExportOptions = {}
+): string {
+  const filtered: DiscoveryResult = {
+    ...result,
+    endpoints: result.endpoints.filter((ep) => {
+      const name = resolveProjectName(ep, options.projectRoots ?? []) ?? 'Unmapped Project';
+      return name === projectName;
+    })
+  };
+  return serializeHttpForgeCollection(filtered, {
+    ...options,
+    collectionName: options.collectionName ?? projectName,
+    description: `Endpoints for project: ${projectName}`
+  });
+}
+
+/** Export only the endpoints belonging to a specific project + framework combination. */
+export function serializeScopedFrameworkCollection(
+  result: DiscoveryResult,
+  projectName: string,
+  framework: ApiFramework,
+  options: HttpForgeCollectionExportOptions = {}
+): string {
+  const filtered: DiscoveryResult = {
+    ...result,
+    endpoints: result.endpoints.filter((ep) => {
+      const name = resolveProjectName(ep, options.projectRoots ?? []) ?? 'Unmapped Project';
+      return name === projectName && ep.framework === framework;
+    })
+  };
+  return serializeHttpForgeCollection(filtered, {
+    ...options,
+    collectionName: options.collectionName ?? `${projectName} – ${framework.toUpperCase()}`,
+    description: `${framework.toUpperCase()} endpoints for project: ${projectName}`
+  });
 }

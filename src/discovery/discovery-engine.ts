@@ -335,7 +335,7 @@ export class ApiDiscoveryEngine {
     return merged;
   }
 
-  private providerFramework(providerId: string): 'express' | 'nestjs' | 'fastify' | 'unknown' {
+  private providerFramework(providerId: string): 'express' | 'nestjs' | 'fastify' | 'lambda' | 'unknown' {
     if (providerId.includes('express')) {
       return 'express';
     }
@@ -344,6 +344,9 @@ export class ApiDiscoveryEngine {
     }
     if (providerId.includes('fastify')) {
       return 'fastify';
+    }
+    if (providerId.includes('lambda')) {
+      return 'lambda';
     }
     return 'unknown';
   }

@@ -14,6 +14,7 @@ const DETECTION_HINTS: Record<ApiFramework, string[]> = {
   express: ['express', 'router.', 'app.use(', 'app.get(', 'express.Router'],
   nestjs: ['@nestjs/common', '@Controller(', '@Get(', '@Post('],
   fastify: ['fastify', 'fastify.route(', 'fastify.get(', 'register('],
+  lambda: ['exports.handler', 'event.pathParameters', 'APIGatewayProxyEvent', 'aws-lambda'],
   unknown: []
 };
 
@@ -62,6 +63,17 @@ export class FrameworkDetector {
     }
     if (this.hasDependency(fingerprint, 'fastify') || this.hasSourceHint(fingerprint, 'fastify')) {
       found.push('fastify');
+    }
+
+    const hasExpressOrFastify = found.includes('express') || found.includes('fastify');
+    if (!hasExpressOrFastify) {
+      const isLambdaDep =
+        this.hasDependency(fingerprint, '@types/aws-lambda') ||
+        this.hasDependency(fingerprint, 'aws-lambda') ||
+        this.hasDependency(fingerprint, 'serverless');
+      if (isLambdaDep || this.hasSourceHint(fingerprint, 'lambda')) {
+        found.push('lambda');
+      }
     }
 
     return found.length > 0 ? found : ['unknown'];
