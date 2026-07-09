@@ -73,6 +73,7 @@ Supported frameworks: Express, NestJS, and Fastify.
 {
 	"nodeApiForge.frameworks": ["auto"],
 	"nodeApiForge.customSeedLoaderModulePath": "./node-api-forge-generic-loader.js",
+	"nodeApiForge.contextProperties": ["locals"],
 	"nodeApiForge.autoRefreshOnFileChanges": true,
 	"nodeApiForge.searchComponentLibAllowlist": [],
 	"nodeApiForge.apiExplorerFrameworkPageSize": 200
@@ -85,9 +86,19 @@ Supported frameworks: Express, NestJS, and Fastify.
 |---|---|---|---|
 | `nodeApiForge.frameworks` | `string[]` | `["auto"]` | Framework hints for discovery in mixed projects (`auto`, `express`, `fastify`, `nestjs`). |
 | `nodeApiForge.customSeedLoaderModulePath` | `string` | `""` | Optional JS module that exports `loadSeedManifestEndpoints(projectRoot, context)`. |
+| `nodeApiForge.contextProperties` | `string[]` | `["locals"]` | Shared context sub-properties to track on inferred request/response roots (for example `["locals", "context"]`). |
 | `nodeApiForge.autoRefreshOnFileChanges` | `boolean` | `true` | Automatically reruns discovery on relevant source/config changes. |
 | `nodeApiForge.searchComponentLibAllowlist` | `string[]` | `[]` | External/internal library packages Flow Search is allowed to traverse. |
 | `nodeApiForge.apiExplorerFrameworkPageSize` | `number` | `200` | Endpoints per framework page in API Explorer for large endpoint sets (range `25` to `1000`). |
+
+### Discovery Guidance
+
+When a manual discovery run finds very few endpoints (or none) and no custom seed loader is configured, Node API Forge shows a warning with actions to open:
+
+- custom seed loader docs
+- `nodeApiForge.customSeedLoaderModulePath` setting
+
+This helps when routes are registered indirectly and cannot be fully inferred from static source patterns.
 
 ## Docs
 

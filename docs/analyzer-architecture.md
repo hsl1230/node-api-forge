@@ -64,6 +64,23 @@ The discovery engine layers shared behavior on top of provider output:
 
 This keeps framework traversal logic inside providers while preserving consistent output behavior across frameworks.
 
+## Request and Response Inference Model
+
+Parameter extraction does not depend on hardcoded variable names like `req`/`res`.
+
+The analyzer uses AST-based root inference and call-site propagation to follow request/response-like objects across:
+
+- middleware and handlers
+- local helper calls
+- imported helper calls
+
+Context-style property tracking is configurable through `nodeApiForge.contextProperties` (default: `['locals']`).
+This allows the same extraction pipeline to capture values from chains such as:
+
+- `response.locals.userId`
+- `ctx.context.tenantId`
+- other project-specific context properties configured by the user
+
 ## Incremental Caching Model
 
 Node API Forge uses layered caches to keep refreshes fast on large workspaces:

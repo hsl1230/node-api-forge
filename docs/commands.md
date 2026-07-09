@@ -17,6 +17,21 @@ Node API Forge contributes the following commands:
 3. Use endpoint actions from the context menu.
 4. Use `Hard Refresh Workspace` when major route changes are not reflected yet.
 
+## Discovery Notes
+
+- `Node API Forge: Discover APIs` performs a manual refresh and prints discovery diagnostics to the output channel.
+- If no custom seed loader is configured and discovery returns very few endpoints, the extension shows an in-product warning with quick actions to open:
+	- the custom seed loader guide
+	- the `nodeApiForge.customSeedLoaderModulePath` setting
+- This behavior is intended to guide projects that register routes through wrappers, manifests, or runtime composition patterns that static analysis cannot fully reconstruct.
+
+## Related Settings
+
+- `nodeApiForge.customSeedLoaderModulePath`
+- `nodeApiForge.contextProperties`
+- `nodeApiForge.frameworks`
+- `nodeApiForge.autoRefreshOnFileChanges`
+
 ## Performance Tuning
 
 If a framework node contains a very large number of endpoints, tune pagination with:
