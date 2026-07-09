@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Node API Forge icon">
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="18 18 92 92" role="img" aria-label="Node API Forge icon">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#0f172a"/>
@@ -13,8 +13,6 @@
       <stop offset="100%" stop-color="#22c55e" stop-opacity="0.55"/>
     </linearGradient>
   </defs>
-
-  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
 
   <circle cx="64" cy="64" r="42" fill="none" stroke="url(#ring)" stroke-width="4"/>
 

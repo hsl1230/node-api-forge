@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { extractPathParameters } from './analyzer';
+import * as ts from 'typescript';
+import { analyzeHandlerMetadata, extractPathParameters } from './analyzer';
 import { FrameworkDetector } from './framework-detector';
 import { ApiDiscoveryProvider } from './provider';
 import { loadHybridSeedEndpoints } from './seed-loader';
@@ -9,6 +10,7 @@ import { ApiEndpoint, ApiParameter, DiscoveryContext, DiscoveryResult, Parameter
 interface CachedComponentDependencies {
   mtimeMs: number;
   size: number;
+  contextSignature: string;
   dependencies: string[];
   parameters: ApiParameter[];
 }
@@ -95,8 +97,8 @@ class ComponentDependencyGraph {
     }
   }
 
-  public getParameters(filePath: string): ApiParameter[] {
-    const analysis = this.getComponentAnalysis(filePath).analysis;
+  public getParameters(filePath: string, contextProperties: string[] = ['locals']): ApiParameter[] {
+    const analysis = this.getComponentAnalysis(filePath, contextProperties).analysis;
     if (!analysis) {
       return [];
     }
@@ -117,8 +119,10 @@ class ComponentDependencyGraph {
     };
   }
 
-  private getComponentAnalysis(filePath: string): { analysis?: CachedComponentDependencies; changed: boolean } {
+  private getComponentAnalysis(filePath: string, contextProperties: string[] = ['locals']): { analysis?: CachedComponentDependencies; changed: boolean } {
     const normalizedPath = normalizeFilePath(filePath);
+    const normalizedContextProperties = normalizeContextProperties(contextProperties);
+    const contextSignature = normalizedContextProperties.join('|');
 
     let stat: fs.Stats;
     try {
@@ -130,7 +134,7 @@ class ComponentDependencyGraph {
     }
 
     const cached = this.componentCache.get(normalizedPath);
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.contextSignature === contextSignature) {
       return { analysis: cached, changed: false };
     }
 
@@ -152,42 +156,12 @@ class ComponentDependencyGraph {
       dependencies.push(normalizeFilePath(resolved));
     }
 
-    const byKey = new Map<string, ApiParameter>();
-    for (const pattern of PARAM_PATTERNS) {
-      pattern.regex.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = pattern.regex.exec(content)) !== null) {
-        const name = match[1];
-        const key = parameterKey(pattern.location, name);
-        const location: SourceLocation = {
-          filePath: normalizedPath,
-          line: estimateLine(content, match.index),
-          accessMode: pattern.accessMode
-        };
-
-        const existing = byKey.get(key);
-        if (existing) {
-          appendEvidenceLocation(existing, location);
-          continue;
-        }
-
-        byKey.set(key, {
-          name,
-          location: pattern.location,
-          type: 'string',
-          required: false,
-          description: `Inferred from ${normalizedPath}`,
-          detectionLocation: location,
-          evidenceLocations: [location]
-        });
-      }
-    }
-
-    const parameters = Array.from(byKey.values());
+    const parameters = extractParametersFromComponentSource(content, normalizedPath, normalizedContextProperties);
 
     const analysis: CachedComponentDependencies = {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
+      contextSignature,
       dependencies,
       parameters
     };
@@ -332,7 +306,7 @@ export class ApiDiscoveryEngine {
 
     for (const endpoint of merged.endpoints) {
       enrichEndpointPathParameters(endpoint);
-      const enrichment = this.enrichEndpointParametersFromComponents(endpoint);
+      const enrichment = this.enrichEndpointParametersFromComponents(endpoint, context.contextProperties);
       if (enrichment.reused) {
         parameterCacheReusedEndpoints += 1;
       } else {
@@ -399,7 +373,7 @@ export class ApiDiscoveryEngine {
     }
   }
 
-  private enrichEndpointParametersFromComponents(endpoint: ApiEndpoint): { reused: boolean; truncated: boolean } {
+  private enrichEndpointParametersFromComponents(endpoint: ApiEndpoint, contextProperties: string[] = ['locals']): { reused: boolean; truncated: boolean } {
     const byKey = new Map<string, ApiParameter>();
     for (const parameter of endpoint.parameters ?? []) {
       byKey.set(parameterKey(parameter.location, parameter.name), parameter);
@@ -442,7 +416,7 @@ export class ApiDiscoveryEngine {
     }
 
     for (const filePath of expandedFiles) {
-      const parameters = this.componentDependencyGraph.getParameters(filePath);
+      const parameters = this.componentDependencyGraph.getParameters(filePath, contextProperties);
       for (const parameter of parameters) {
         const key = parameterKey(parameter.location, parameter.name);
         const existing = byKey.get(key);
@@ -521,22 +495,62 @@ function enrichEndpointPathParameters(endpoint: ApiEndpoint): void {
   }
 }
 
-const PARAM_PATTERNS: Array<{ location: ParameterLocation; regex: RegExp; accessMode: 'read' | 'write' }> = [
-  { location: 'query', regex: /req\.query\.([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/g, accessMode: 'write' },
-  { location: 'path', regex: /req\.params\.([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/g, accessMode: 'write' },
-  { location: 'body', regex: /req\.body\.([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/g, accessMode: 'write' },
-  { location: 'cookie', regex: /req\.cookies\.([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/g, accessMode: 'write' },
-  { location: 'header', regex: /req\.headers\.([A-Za-z_][A-Za-z0-9_-]*)\s*=(?!=)/g, accessMode: 'write' },
-  { location: 'header', regex: /req\.headers\[['"`]([^'"`]+)['"`]\]\s*=(?!=)/g, accessMode: 'write' },
-  { location: 'query', regex: /req\.query\.([A-Za-z_][A-Za-z0-9_]*)/g, accessMode: 'read' },
-  { location: 'path', regex: /req\.params\.([A-Za-z_][A-Za-z0-9_]*)/g, accessMode: 'read' },
-  { location: 'body', regex: /req\.body\.([A-Za-z_][A-Za-z0-9_]*)/g, accessMode: 'read' },
-  { location: 'cookie', regex: /req\.cookies\.([A-Za-z_][A-Za-z0-9_]*)/g, accessMode: 'read' },
-  { location: 'header', regex: /req\.headers\.([A-Za-z_][A-Za-z0-9_-]*)/g, accessMode: 'read' },
-  { location: 'header', regex: /req\.headers\[['"`]([^'"`]+)['"`]\]/g, accessMode: 'read' },
-  { location: 'header', regex: /req\.get\(['"`]([^'"`]+)['"`]\)/g, accessMode: 'read' },
-  { location: 'header', regex: /req\.header\(['"`]([^'"`]+)['"`]\)/g, accessMode: 'read' }
-];
+function extractParametersFromComponentSource(content: string, filePath: string, contextProperties: string[] = ['locals']): ApiParameter[] {
+  const source = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true);
+  const byKey = new Map<string, ApiParameter>();
+
+  const mergeParameter = (parameter: ApiParameter): void => {
+    const key = parameterKey(parameter.location, parameter.name);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, cloneApiParameter(parameter));
+      return;
+    }
+
+    mergeParameterEvidence(existing, parameter);
+    if (!existing.type && parameter.type) {
+      existing.type = parameter.type;
+    }
+    if (parameter.required && !existing.required) {
+      existing.required = true;
+    }
+  };
+
+  const processMetadata = (methodLikeNode: ts.Node): void => {
+    const metadata = analyzeHandlerMetadata(methodLikeNode, source, filePath, 'GET', undefined, undefined, normalizeContextProperties(contextProperties));
+
+    for (const parameter of metadata.parameters) {
+      mergeParameter(parameter);
+    }
+
+    for (const cookie of metadata.cookies) {
+      if (cookie.type !== 'request') {
+        continue;
+      }
+
+      mergeParameter({
+        name: cookie.name,
+        location: 'cookie',
+        type: 'string',
+        required: false,
+        detectionLocation: cookie.detectionLocation ? { ...cookie.detectionLocation } : undefined,
+        evidenceLocations: cookie.detectionLocation ? [{ ...cookie.detectionLocation }] : undefined,
+        description: `Inferred from ${filePath}`
+      });
+    }
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionLike(node)) {
+      processMetadata(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(source);
+
+  return Array.from(byKey.values());
+}
 
 function extractDependencySpecifiers(content: string): string[] {
   const specs = new Set<string>();
@@ -688,16 +702,14 @@ function appendEvidenceLocation(parameter: ApiParameter, location: SourceLocatio
   }
 }
 
-function estimateLine(content: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index && i < content.length; i += 1) {
-    if (content.charCodeAt(i) === 10) {
-      line += 1;
-    }
-  }
-  return line;
-}
-
 function parameterKey(location: ParameterLocation, name: string): string {
   return `${location}:${name.toLowerCase()}`;
+}
+
+function normalizeContextProperties(values: string[] | undefined): string[] {
+  const normalized = (values ?? [])
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  return normalized.length > 0 ? Array.from(new Set(normalized)) : ['locals'];
 }

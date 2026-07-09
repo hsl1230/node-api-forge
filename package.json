@@ -2,7 +2,7 @@
   "name": "node-api-forge",
   "displayName": "Node API Forge",
   "description": "Discover, test, and document Node APIs without Swagger—no app integration, full testing workflows, pure source-to-API in seconds.",
-  "version": "0.0.5",
+  "version": "0.1.0",
   "publisher": "henry-huang",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -181,6 +181,16 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically refresh discovery when relevant source files change. New files that are not yet referenced by discovered components are ignored to reduce noise."
+        },
+        "nodeApiForge.contextProperties": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "locals"
+          ],
+          "description": "Shared context sub-properties to track on inferred request/response objects (for example ['locals', 'context'])."
         },
         "nodeApiForge.searchComponentLibAllowlist": {
           "type": "array",

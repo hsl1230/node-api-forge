@@ -1,13 +1,13 @@
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import {
-  COPY_ENDPOINT_REQUEST_COMMAND_ID,
-  DISCOVER_APIS_COMMAND_ID,
-  EXPORT_COMMAND_ID,
-  HARD_REFRESH_WORKSPACE_COMMAND_ID,
-  OPEN_ENDPOINT_SOURCE_COMMAND_ID,
-  OPEN_HTTP_FORGE_COMMAND_ID,
-  SHOW_FLOW_COMMAND_ID
+    COPY_ENDPOINT_REQUEST_COMMAND_ID,
+    DISCOVER_APIS_COMMAND_ID,
+    EXPORT_COMMAND_ID,
+    HARD_REFRESH_WORKSPACE_COMMAND_ID,
+    OPEN_ENDPOINT_SOURCE_COMMAND_ID,
+    OPEN_HTTP_FORGE_COMMAND_ID,
+    SHOW_FLOW_COMMAND_ID
 } from './commands';
 import { ApiEndpoint, createDefaultDiscoveryEngine } from './discovery';
 import { ApiExplorerTreeProvider } from './discovery/api-explorer-tree-provider';
@@ -21,6 +21,7 @@ import { FlowDiagramPanel } from './webview/flow-diagram-panel';
 const HTTP_FORGE_EXTENSION_ID = 'henry-huang.http-forge';
 const FRAMEWORK_CACHE_PREFIX = 'frameworkCache:';
 const SUPPORTED_FRAMEWORKS = new Set(['express', 'fastify', 'nestjs'] as const);
+const FEW_ENDPOINTS_THRESHOLD = 2;
 
 interface HttpForgeApi {
   openRequestContext(options: {
@@ -42,6 +43,14 @@ interface HttpForgeApi {
   }): void;
 }
 
+function normalizeContextProperties(values: string[] | undefined): string[] {
+  const normalized = (values ?? [])
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  return normalized.length > 0 ? Array.from(new Set(normalized)) : ['locals'];
+}
+
 type DiscoverySelection = { workspaceFolder: string; includeProjectRoots?: string[] };
 
 type AutoRefreshEventKind = 'create' | 'change' | 'delete';
@@ -52,7 +61,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const frameworkDetector = new FrameworkDetector();
   const explorerProvider = new ApiExplorerTreeProvider(discoveryEngine);
   let lastSelection: DiscoverySelection | undefined;
-  let lastDiscoveryContext: { projectRoots: string[]; customSeedLoaderModulePath?: string } | undefined;
+  let lastDiscoveryContext: { projectRoots: string[]; customSeedLoaderModulePath?: string; contextProperties?: string[] } | undefined;
   let trackedFiles = new Set<string>();
   let autoRefreshTimer: NodeJS.Timeout | undefined;
   let autoRefreshInFlight = false;
@@ -303,6 +312,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const { workspaceFolder, includeProjectRoots } = selection;
     const configuration = vscode.workspace.getConfiguration('nodeApiForge');
     const customSeedLoaderModulePath = configuration.get<string>('customSeedLoaderModulePath');
+    const contextProperties = normalizeContextProperties(configuration.get<string[]>('contextProperties'));
     console.log('[extension] Configuration read - customSeedLoaderModulePath:', customSeedLoaderModulePath);
     const configuredFrameworks = configuration.get<string[]>('frameworks') ?? ['auto'];
     const projectRoots = includeProjectRoots?.length ? includeProjectRoots : [workspaceFolder];
@@ -317,7 +327,8 @@ export function activate(context: vscode.ExtensionContext): void {
       workspaceFolder,
       includeProjectRoots,
       frameworksByProjectRoot,
-      customSeedLoaderModulePath
+      customSeedLoaderModulePath,
+      contextProperties
     };
 
     console.log('[extension] refreshContext:', JSON.stringify(refreshContext, null, 2).substring(0, 300));
@@ -329,6 +340,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (customSeedLoaderModulePath) {
       output.appendLine(`Custom seed loader: ${customSeedLoaderModulePath}`);
     }
+    output.appendLine(`Context properties: ${contextProperties.join(', ')}`);
 
     const result = await explorerProvider.refresh(refreshContext);
     if (!result) {
@@ -337,7 +349,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     trackedFiles = buildTrackedFiles(result, projectRoots, customSeedLoaderModulePath);
     lastSelection = selection;
-    lastDiscoveryContext = { projectRoots, customSeedLoaderModulePath };
+    lastDiscoveryContext = { projectRoots, customSeedLoaderModulePath, contextProperties };
 
     output.appendLine(`Frameworks: ${result.stats.frameworksDetected.join(', ') || 'none'}`);
     output.appendLine(`Providers run: ${result.stats.providersRun.join(', ') || 'none'}`);
@@ -367,6 +379,24 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showInformationMessage(
         `Node API Forge: Found ${result.stats.endpointCount} endpoints (${result.stats.frameworksDetected.join(', ') || 'unknown framework'}).`
       );
+
+      if (!customSeedLoaderModulePath && result.stats.endpointCount <= FEW_ENDPOINTS_THRESHOLD) {
+        const docsUri = vscode.Uri.joinPath(context.extensionUri, 'docs', 'custom-seed-loader.md');
+        const action = await vscode.window.showWarningMessage(
+          result.stats.endpointCount === 0
+            ? 'Node API Forge: No endpoints were discovered. This usually means some routes are registered outside the source patterns Node API Forge can infer. Configure a custom seed loader to supply those endpoints. See the Custom Seed Loader document for setup.'
+            : `Node API Forge: Only ${result.stats.endpointCount} endpoint(s) were discovered. Some routes may be registered indirectly or outside the source patterns Node API Forge can infer. Configure a custom seed loader to supplement discovery. See the Custom Seed Loader document for setup.`,
+          'Open Docs',
+          'Open Setting'
+        );
+
+        if (action === 'Open Docs') {
+          const document = await vscode.workspace.openTextDocument(docsUri);
+          await vscode.window.showTextDocument(document, { preview: false });
+        } else if (action === 'Open Setting') {
+          await vscode.commands.executeCommand('workbench.action.openSettings', 'nodeApiForge.customSeedLoaderModulePath');
+        }
+      }
     }
   }
 

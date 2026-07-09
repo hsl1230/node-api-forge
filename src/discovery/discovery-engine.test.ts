@@ -216,6 +216,118 @@ describe('ApiDiscoveryEngine custom seed loader', () => {
     expect(endpoint).toBeDefined();
     expect(endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'traceId')).toBe(true);
   });
+
+  it('extracts parameter usage from imported helpers without req/res variable names', async () => {
+    const root = makeProject({ dependencies: { express: '^4.0.0' } });
+    fs.writeFileSync(
+      path.join(root, 'src', 'app.ts'),
+      [
+        "import { handle } from './handler';",
+        '',
+        'export function route(incoming, outgoing) {',
+        '  return handle(incoming, outgoing);',
+        '}'
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(root, 'src', 'handler.ts'),
+      [
+        "import { enrich } from './meta-utils';",
+        '',
+        'export function handle(httpRequest, httpResponse) {',
+        '  enrich(httpRequest, httpResponse);',
+        "  return httpResponse.status(200).json({ ok: true });",
+        '}'
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(root, 'src', 'meta-utils.ts'),
+      [
+        'export function enrich(inbound, outbound) {',
+        '  const traceId = inbound.query.traceId;',
+        '  const authHeader = inbound.headers["x-auth-token"];',
+        '  outbound.locals.sessionId = traceId ?? authHeader;',
+        '}'
+      ].join('\n')
+    );
+
+    const provider = new MockProvider({
+      endpoints: [{
+        method: 'GET',
+        framework: 'express',
+        pathExpression: '/alias',
+        resolvedPath: '/alias',
+        confidence: 'high',
+        handlerLocation: { filePath: path.join(root, 'src', 'app.ts'), line: 1 },
+        middleware: []
+      }],
+      warnings: [],
+      stats: { frameworksDetected: ['express'], providersRun: ['provider.mock'], endpointCount: 1, unresolvedEndpointCount: 0, scanDurationMs: 1 }
+    });
+
+    const engine = new ApiDiscoveryEngine([provider]);
+    const result = await engine.discover({ workspaceFolder: root });
+    const endpoint = result.endpoints.find((e) => (e.resolvedPath ?? e.pathExpression) === '/alias');
+
+    expect(endpoint).toBeDefined();
+    expect(endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'traceId')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'header' && item.name === 'x-auth-token')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'locals' && item.name === 'sessionId')).toBe(true);
+  });
+
+  it('extracts destructured aliases for query path and headers in fallback component scanning', async () => {
+    const root = makeProject({ dependencies: { express: '^4.0.0' } });
+    fs.writeFileSync(
+      path.join(root, 'src', 'app.ts'),
+      [
+        "import { handle } from './handler';",
+        '',
+        'export const route = (requestCtx, responseCtx) => {',
+        '  return handle(requestCtx, responseCtx);',
+        '};'
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(root, 'src', 'handler.ts'),
+      [
+        'export function handle(inbound, outbound) {',
+        '  const { featureFlag } = inbound.query;',
+        '  const { userId } = inbound.params;',
+        '  const headerBag = inbound.headers;',
+        '  const requestId = headerBag["x-request-id"];',
+        '  const details = outbound.locals?.details;',
+        '  if (details) {',
+        '    outbound.locals.details = `${featureFlag}-${userId}-${requestId}`;',
+        '  }',
+        "  return outbound.send('ok');",
+        '}'
+      ].join('\n')
+    );
+
+    const provider = new MockProvider({
+      endpoints: [{
+        method: 'GET',
+        framework: 'express',
+        pathExpression: '/destructure/:userId',
+        resolvedPath: '/destructure/:userId',
+        confidence: 'high',
+        handlerLocation: { filePath: path.join(root, 'src', 'app.ts'), line: 1 },
+        middleware: []
+      }],
+      warnings: [],
+      stats: { frameworksDetected: ['express'], providersRun: ['provider.mock'], endpointCount: 1, unresolvedEndpointCount: 0, scanDurationMs: 1 }
+    });
+
+    const engine = new ApiDiscoveryEngine([provider]);
+    const result = await engine.discover({ workspaceFolder: root });
+    const endpoint = result.endpoints.find((e) => (e.resolvedPath ?? e.pathExpression) === '/destructure/:userId');
+
+    expect(endpoint).toBeDefined();
+    expect(endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'featureFlag')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'path' && item.name === 'userId')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'header' && item.name === 'x-request-id')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'locals' && item.name === 'details')).toBe(true);
+  });
 });
 
 class MockProvider implements ApiDiscoveryProvider {

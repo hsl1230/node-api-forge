@@ -172,8 +172,9 @@ async function navigateToSource(filePath: string, line: number): Promise<void> {
 function buildMermaidDiagram(endpoint: ApiEndpoint): string {
   const lines: string[] = ['flowchart TD'];
   const route = endpoint.resolvedPath ?? endpoint.pathExpression;
+  const label = formatEndpointDisplayLabel(endpoint) ?? (endpoint.method + ' ' + route);
 
-  lines.push(`    REQ["${esc(endpoint.method + ' ' + route)}"]`);
+  lines.push(`    REQ["${esc(label)}"]`);
   lines.push(`    style REQ fill:#1e3a5f,color:#90cdf4,stroke:#2b6cb0,stroke-width:2px`);
 
   const hf = endpoint.handlerLocation;
@@ -470,13 +471,6 @@ function extractDependencySpecifiers(content: string): string[] {
     if (!value) {
       return;
     }
-
-function resolveAccessMode(location: SourceLocation | undefined, fallback: 'read' | 'write'): 'read' | 'write' {
-  if (location?.accessMode === 'read' || location?.accessMode === 'write') {
-    return location.accessMode;
-  }
-  return fallback;
-}
     const trimmed = value.trim();
     if (!trimmed) {
       return;

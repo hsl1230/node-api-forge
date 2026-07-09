@@ -15,7 +15,7 @@ export interface ApiMiddleware {
   location?: SourceLocation;
 }
 
-export type ParameterLocation = 'path' | 'query' | 'header' | 'cookie' | 'body';
+export type ParameterLocation = 'path' | 'query' | 'header' | 'cookie' | 'body' | 'locals' | (string & {});
 
 export interface ApiParameter {
   name: string;
@@ -61,6 +61,8 @@ export interface ApiEndpoint {
   projectName?: string;
   pathExpression: string;
   resolvedPath?: string;
+  displayName?: string;
+  operationId?: string;
   confidence: EndpointConfidence;
   handlerLocation: SourceLocation;
   middleware: ApiMiddleware[];
@@ -121,4 +123,10 @@ export interface DiscoveryContext {
   envOverrides?: Record<string, string>;
   frameworksByProjectRoot?: Record<string, ApiFramework[]>;
   customSeedLoaderModulePath?: string;
+  /**
+   * Sub-property names on request/response objects to track as shared context.
+   * Defaults to ["locals"] (Express res.locals convention).
+   * Add names like "context" or "state" for custom patterns.
+   */
+  contextProperties?: string[];
 }

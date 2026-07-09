@@ -519,6 +519,299 @@ fastify.get('/status', function handler(req, reply) {
     expect(failed?.body?.type).toBe('text');
   });
 
+  it('propagates request/response roots transitively across 3 levels of local helpers with renamed params each level', async () => {
+    const root = makeProject(
+      { dependencies: { express: '^4.0.0' } },
+      `const express = require('express');
+const app = express();
+
+// Level 3 — deepest, calls level 2 function with its own names
+function extract(httpReq, httpRes) {
+  const sku = httpReq.body.items[0].sku;
+  httpRes.locals.sku = sku;
+}
+
+// Level 2 — calls level 3 with swapped param order
+function transform(outbound, inbound) {
+  const token = inbound.headers['x-token'];
+  extract(inbound, outbound);  // inbound is request, outbound is response
+}
+
+// Level 1 — called from route handler
+function enrich(mid, ctx) {
+  const page = ctx.query.page;
+  transform(mid, ctx);  // mid is response, ctx is request
+}
+
+app.post('/items/:id', function handler(req, res) {
+  enrich(res, req);   // res first, req second
+  res.json({ ok: true });
+});
+`
+    );
+
+    const fingerprint = detector.buildFingerprint(root);
+    const provider = new ExpressDiscoveryProvider();
+    const result = await provider.discover({ workspaceFolder: root }, fingerprint);
+    const endpoint = result.endpoints.find(
+      (item) => item.method === 'POST' && (item.resolvedPath ?? item.pathExpression) === '/items/:id'
+    );
+
+    expect(endpoint).toBeDefined();
+    // detected at level 2
+    expect(endpoint?.parameters?.some((item) => item.location === 'header' && item.name === 'x-token')).toBe(true);
+    // detected at level 1
+    expect(endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'page')).toBe(true);
+    // detected at level 3
+    expect(endpoint?.parameters?.some((item) => item.location === 'body' && item.name === 'items[].sku')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'locals' && item.name === 'sku')).toBe(true);
+  });
+
+  it('propagates request/response roots transitively across 3 levels of cross-file helpers with renamed params each level', async () => {
+    const root = makeProject(
+      { dependencies: { express: '^4.0.0' } },
+      `const express = require('express');
+const { enrich } = require('./level1');
+const app = express();
+
+app.post('/items/:id', function handler(req, res) {
+  enrich(res, req);   // res first, req second
+  res.json({ ok: true });
+});
+`,
+      {
+        'level1.ts': `import { transform } from './level2';
+export function enrich(mid, ctx) {
+  const page = ctx.query.page;
+  transform(mid, ctx);  // mid=response, ctx=request
+}
+`,
+        'level2.ts': `import { extract } from './level3';
+export function transform(outbound, inbound) {
+  const token = inbound.headers['x-token'];
+  extract(inbound, outbound);  // inbound=request, outbound=response
+}
+`,
+        'level3.ts': `export function extract(httpReq, httpRes) {
+  const sku = httpReq.body.items[0].sku;
+  httpRes.locals.sku = sku;
+}
+`
+      }
+    );
+
+    const fingerprint = detector.buildFingerprint(root);
+    const provider = new ExpressDiscoveryProvider();
+    const result = await provider.discover({ workspaceFolder: root }, fingerprint);
+    const endpoint = result.endpoints.find(
+      (item) => item.method === 'POST' && (item.resolvedPath ?? item.pathExpression) === '/items/:id'
+    );
+
+    expect(endpoint).toBeDefined();
+    expect(endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'page')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'header' && item.name === 'x-token')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'body' && item.name === 'items[].sku')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'locals' && item.name === 'sku')).toBe(true);
+  });
+
+  it('infers request/response roots from call-site arguments when helper uses non-standard parameter order', async () => {
+    const root = makeProject(
+      { dependencies: { express: '^4.0.0' } },
+      `const express = require('express');
+const app = express();
+
+// Note: enrich takes (response, request) — reversed from convention
+function enrich(outbound, inbound) {
+  const page = inbound.query.page;
+  const userId = inbound.params.userId;
+  outbound.locals.enriched = true;
+}
+
+app.get('/users/:userId', function handler(req, res) {
+  enrich(res, req);   // res is passed first, req second
+  res.json({ ok: true });
+});
+`
+    );
+
+    const fingerprint = detector.buildFingerprint(root);
+    const provider = new ExpressDiscoveryProvider();
+    const result = await provider.discover({ workspaceFolder: root }, fingerprint);
+    const endpoint = result.endpoints.find(
+      (item) => item.method === 'GET' && (item.resolvedPath ?? item.pathExpression) === '/users/:userId'
+    );
+
+    expect(endpoint).toBeDefined();
+    expect(endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'page')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'path' && item.name === 'userId')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'locals' && item.name === 'enriched')).toBe(true);
+  });
+
+  it('infers request/response roots when passing to a cross-file helper with non-standard parameter order', async () => {
+    const root = makeProject(
+      { dependencies: { express: '^4.0.0' } },
+      `const express = require('express');
+const { enrich } = require('./enricher');
+const app = express();
+
+app.post('/orders/:orderId', function handler(req, res) {
+  enrich(res, req);  // response first, request second
+  res.json({ ok: true });
+});
+`,
+      {
+        'enricher.ts': `export function enrich(httpResponse, httpRequest) {
+  const orderId = httpRequest.params.orderId;
+  const token = httpRequest.headers['x-auth-token'];
+  const body = httpRequest.body;
+  const sku = body.items[0].sku;
+  httpResponse.locals.orderId = orderId;
+}
+`
+      }
+    );
+
+    const fingerprint = detector.buildFingerprint(root);
+    const provider = new ExpressDiscoveryProvider();
+    const result = await provider.discover({ workspaceFolder: root }, fingerprint);
+    const endpoint = result.endpoints.find(
+      (item) => item.method === 'POST' && (item.resolvedPath ?? item.pathExpression) === '/orders/:orderId'
+    );
+
+    expect(endpoint).toBeDefined();
+    expect(endpoint?.parameters?.some((item) => item.location === 'path' && item.name === 'orderId')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'header' && item.name === 'x-auth-token')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'body' && item.name === 'items[].sku')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'locals' && item.name === 'orderId')).toBe(true);
+  });
+
+  it('infers correct roots when the same local helper is called from two sites with opposite argument order', async () => {
+    // Both call sites must contribute to the hint set so the helper
+    // correctly identifies both request and response roots regardless of order.
+    const root = makeProject(
+      { dependencies: { express: '^4.0.0' } },
+      `const express = require('express');
+const app = express();
+
+// Called as: logAccess(req, res) AND logAccess(res, req) from two routes
+function logAccess(first, second) {
+  const page = first.query?.page ?? second.query?.page;
+  second.locals.logged = true;
+}
+
+app.get('/a', function handlerA(req, res) {
+  logAccess(req, res);   // first=request, second=response
+  res.json({ ok: true });
+});
+
+app.get('/b', function handlerB(req, res) {
+  logAccess(res, req);   // first=response, second=request — opposite order
+  res.json({ ok: true });
+});
+`
+    );
+
+    const fingerprint = detector.buildFingerprint(root);
+    const provider = new ExpressDiscoveryProvider();
+    const result = await provider.discover({ workspaceFolder: root }, fingerprint);
+
+    for (const path of ['/a', '/b']) {
+      const endpoint = result.endpoints.find(
+        (item) => item.method === 'GET' && (item.resolvedPath ?? item.pathExpression) === path
+      );
+      expect(endpoint, `endpoint ${path}`).toBeDefined();
+      expect(
+        endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'page'),
+        `${path} should detect query.page`
+      ).toBe(true);
+      expect(
+        endpoint?.parameters?.some((item) => item.location === 'locals' && item.name === 'logged'),
+        `${path} should detect locals.logged`
+      ).toBe(true);
+    }
+  });
+
+  it('correctly analyses a shared cross-file helper called with opposite argument order from two different routes', async () => {
+    // This is the scenario described as the "remaining bound":
+    // helper.ts is imported by two routes that each pass (req,res) in a different order.
+    // Because each route's traversal is independent (fresh visitedSymbols), each gets
+    // its own correctly-scoped analysis of the helper — so both should work.
+    const root = makeProject(
+      { dependencies: { express: '^4.0.0' } },
+      `const express = require('express');
+const { process: processRequest } = require('./processor');
+const app = express();
+
+// Route A: passes (req, res) — first=request, second=response
+app.get('/a', function handlerA(req, res) {
+  processRequest(req, res);
+  res.json({ ok: true });
+});
+
+// Route B: passes (res, req) — first=response, second=request (opposite order)
+app.get('/b', function handlerB(req, res) {
+  processRequest(res, req);
+  res.json({ ok: true });
+});
+`,
+      {
+        'processor.ts': `export function process(first, second) {
+  // first could be req or res depending on the caller
+  const page = first.query?.page ?? second.query?.page;
+  const token = first.headers?.['x-token'] ?? second.headers?.['x-token'];
+  first.locals = first.locals ?? {};
+  first.locals.processed = true;
+  second.locals = second.locals ?? {};
+  second.locals.processed = true;
+}
+`
+      }
+    );
+
+    const fingerprint = detector.buildFingerprint(root);
+    const provider = new ExpressDiscoveryProvider();
+    const result = await provider.discover({ workspaceFolder: root }, fingerprint);
+
+    for (const routePath of ['/a', '/b']) {
+      const endpoint = result.endpoints.find(
+        (item) => item.method === 'GET' && (item.resolvedPath ?? item.pathExpression) === routePath
+      );
+      expect(endpoint, `endpoint ${routePath}`).toBeDefined();
+      expect(
+        endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'page'),
+        `${routePath} should detect query.page`
+      ).toBe(true);
+      expect(
+        endpoint?.parameters?.some((item) => item.location === 'header' && item.name === 'x-token'),
+        `${routePath} should detect header x-token`
+      ).toBe(true);
+    }
+  });
+
+  it('detects custom context property when contextProperties is configured', async () => {
+    const root = makeProject(
+      { dependencies: { express: '^4.0.0' } },
+      `const express = require('express');
+const app = express();
+
+app.post('/ctx/:id', function handler(requestLike, responseLike) {
+  const userId = requestLike.context.userId;
+  responseLike.context.auditId = userId;
+  responseLike.json({ ok: true });
+});
+`
+    );
+
+    const fingerprint = detector.buildFingerprint(root);
+    const provider = new ExpressDiscoveryProvider();
+    const result = await provider.discover({ workspaceFolder: root, contextProperties: ['context'] }, fingerprint);
+    const endpoint = result.endpoints.find((item) => item.method === 'POST' && (item.resolvedPath ?? item.pathExpression) === '/ctx/:id');
+
+    expect(endpoint).toBeDefined();
+    expect(endpoint?.parameters?.some((item) => item.location === 'context' && item.name === 'userId')).toBe(true);
+    expect(endpoint?.parameters?.some((item) => item.location === 'context' && item.name === 'auditId')).toBe(true);
+  });
+
   it('extracts Express response headers on chained status and set calls', async () => {
     const root = makeProject(
       { dependencies: { express: '^4.0.0' } },

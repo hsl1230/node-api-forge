@@ -155,7 +155,7 @@ export class FastifyComponentAnalyzer implements ComponentAnalyzer {
 
       const inheritedHooks = resolveInheritedHooks(routeDefinition.owner, ownerHookNodes, ownerParent);
       const chainNodes = [...inheritedHooks, ...routeDefinition.middlewareNodes, routeDefinition.handlerNode];
-      const metadata = analyzeComponentChainMetadata(chainNodes, source, filePath, routeDefinition.method);
+      const metadata = analyzeComponentChainMetadata(chainNodes, source, filePath, routeDefinition.method, context.contextProperties);
       metadata.parameters.unshift(...pathParams);
       const mergedMetadata = mergeSchemaFirstMetadata(metadata, routeDefinition.schemaMetadata);
 

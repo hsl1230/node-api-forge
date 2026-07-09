@@ -13,7 +13,13 @@
 const vscode = acquireVsCodeApi();
 const state = {
   zoom: 1,
-  pan: { x: 0, y: 0, dragging: false, startX: 0, startY: 0 }
+  pan: { x: 0, y: 0, dragging: false, startX: 0, startY: 0 },
+  expandedNodes: new Set(),
+  diagramNodeMeta: {},
+  sidebar: {
+    history: [],
+    current: null
+  }
 };
 
 mermaid.initialize({
@@ -108,7 +114,9 @@ async function renderMermaidDiagram() {
   const viewport = document.getElementById('diagram-viewport');
   if (!viewport) return;
   try {
-    const { svg } = await mermaid.render('flowchart-main', window.DIAGRAM_SRC);
+    const model = buildFlowDiagramModel();
+    state.diagramNodeMeta = model.nodeMeta;
+    const { svg } = await mermaid.render('flowchart-main', model.source);
     viewport.innerHTML = `<div>${svg}</div>`;
     setupDiagramPan(document.getElementById('mermaid-diagram'), viewport);
     setupNodeClickHandlers(viewport);
@@ -187,15 +195,230 @@ function setupZoomControls() {
 function setupNodeClickHandlers(viewport) {
   viewport.querySelectorAll('.node').forEach(node => {
     node.style.cursor = 'pointer';
-    const rawId = node.id || '';
-    const m = rawId.match(/flowchart-main-([A-Z0-9]+)-/);
-    const id = m ? m[1] : rawId.replace(/^flowchart-main-/, '').replace(/-\d+$/, '');
+    const id = decodeMermaidNodeId(node.id || '');
     node.addEventListener('click', e => {
       e.stopPropagation();
-      if (id === 'HANDLER') openSidebarForHandler();
-      else if (id.startsWith('MW')) openSidebarForMiddleware(parseInt(id.replace('MW', ''), 10));
+      const meta = state.diagramNodeMeta[id];
+      if (!meta) {
+        return;
+      }
+
+      const rect = node.getBoundingClientRect();
+      const clickRatio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 1;
+      const clickedToggleZone = clickRatio < 0.22;
+
+      if (meta.toggleKey && clickedToggleZone) {
+        toggleExpandedNode(meta.toggleKey);
+        renderMermaidDiagram();
+        return;
+      }
+
+      if (meta.type === 'handler') {
+        openSidebarForHandler();
+        return;
+      }
+
+      if (meta.type === 'middleware') {
+        openSidebarForMiddleware(meta.middlewareIndex);
+        return;
+      }
+
+      if (meta.type === 'component') {
+        openSidebarForComponentNode(meta.filePath, meta.line, meta.kind, meta.hasChildren, meta.metrics);
+      }
     });
   });
+}
+
+function decodeMermaidNodeId(rawId) {
+  if (!rawId) {
+    return '';
+  }
+  const m = rawId.match(/^flowchart-main-(.*)-\d+$/);
+  if (m && m[1]) {
+    return m[1];
+  }
+  return rawId.replace(/^flowchart-main-/, '').replace(/-\d+$/, '');
+}
+
+function toggleExpandedNode(toggleKey) {
+  if (!toggleKey) {
+    return;
+  }
+  if (state.expandedNodes.has(toggleKey)) {
+    state.expandedNodes.delete(toggleKey);
+  } else {
+    state.expandedNodes.add(toggleKey);
+  }
+}
+
+function buildFlowDiagramModel() {
+  const endpoint = window.ENDPOINT || {};
+  const graph = window.COMPONENT_GRAPH || {};
+  const lines = ['flowchart TD'];
+  const nodeMeta = {};
+
+  const route = endpoint.resolvedPath || endpoint.pathExpression || '/';
+  const endpointLabel = formatEndpointLabel(endpoint, route);
+  const handlerLocation = endpoint.handlerLocation || {};
+  const handlerFile = shortPath(handlerLocation.filePath || 'handler');
+  const handlerLabel = handlerLocation.symbolName
+    ? `${handlerLocation.symbolName}\\n${handlerFile}:${handlerLocation.line || 1}`
+    : `${handlerFile}:${handlerLocation.line || 1}`;
+
+  lines.push(`    REQ["${escMermaid(endpointLabel)}"]`);
+  lines.push('    style REQ fill:#1e3a5f,color:#90cdf4,stroke:#2b6cb0,stroke-width:2px');
+  lines.push(`    HANDLER["${escMermaid(handlerLabel)}"]`);
+  lines.push('    style HANDLER fill:#1a3a2a,color:#9ae6b4,stroke:#276749,stroke-width:2px');
+
+  nodeMeta.REQ = { type: 'request' };
+  nodeMeta.HANDLER = { type: 'handler' };
+
+  const middleware = endpoint.middleware || [];
+  const handlerPath = normalizeFsPath(handlerLocation.filePath || '');
+  const params = endpoint.parameters || [];
+  const edgeParts = [
+    ...params.filter((p) => p.location === 'path').slice(0, 3).map((p) => `:${p.name}`),
+    ...params.filter((p) => p.location === 'query').slice(0, 3).map((p) => `?${p.name}`)
+  ].join(', ');
+
+  for (let i = 0; i < middleware.length; i++) {
+    const mw = middleware[i] || {};
+    const nodeId = `MW${i}`;
+    const mwPath = normalizeFsPath(mw.location && mw.location.filePath ? mw.location.filePath : '');
+    const directChildren = getGraphChildren(graph, mwPath).filter((child) => child !== handlerPath);
+    const hasChildren = directChildren.length > 0;
+    const toggleKey = `mw:${nodeId}`;
+    const expanded = hasChildren && state.expandedNodes.has(toggleKey);
+    const shortName = (mw.name || '').replace(/\\/g, '/').split('/').pop() || (mw.name || `middleware-${i + 1}`);
+    const labelPrefix = hasChildren ? (expanded ? '▼ ' : '▶ ') : '';
+    const label = `${labelPrefix}${shortName}`;
+
+    lines.push(`    ${nodeId}["${escMermaid(label)}"]`);
+    lines.push(`    style ${nodeId} fill:#2d3748,color:#e2e8f0,stroke:#4a5568,stroke-width:1.5px`);
+
+    nodeMeta[nodeId] = {
+      type: 'middleware',
+      middlewareIndex: i,
+      toggleKey: hasChildren ? toggleKey : undefined
+    };
+
+    if (expanded) {
+      appendComponentSubtree({
+        lines,
+        nodeMeta,
+        graph,
+        parentNodeId: nodeId,
+        parentToggleKey: toggleKey,
+        children: directChildren,
+        visited: new Set([mwPath]),
+        ancestryToken: nodeId
+      });
+    }
+  }
+
+  const firstNode = middleware.length > 0 ? 'MW0' : 'HANDLER';
+  lines.push(edgeParts ? `    REQ -->|"${escMermaid(edgeParts)}"| ${firstNode}` : `    REQ --> ${firstNode}`);
+  for (let i = 0; i < middleware.length - 1; i++) {
+    lines.push(`    MW${i} --> MW${i + 1}`);
+  }
+  if (middleware.length > 0) {
+    lines.push(`    MW${middleware.length - 1} --> HANDLER`);
+  }
+
+  return { source: lines.join('\n'), nodeMeta };
+}
+
+function appendComponentSubtree(ctx) {
+  const { lines, nodeMeta, graph, parentNodeId, parentToggleKey, children, visited, ancestryToken } = ctx;
+
+  children.forEach((childPath, index) => {
+    const childKey = `${parentToggleKey}:${childPath}`;
+    const childNodeId = `${ancestryToken}_C${index}`;
+    const childChildren = getGraphChildren(graph, childPath);
+    const hasChildren = childChildren.length > 0;
+    const expanded = hasChildren && state.expandedNodes.has(childKey);
+    const labelPrefix = hasChildren ? (expanded ? '▼ ' : '▶ ') : '';
+    const label = `${labelPrefix}${shortPath(childPath)}`;
+    const line = getNodeLine(graph, childPath);
+    const kind = getNodeKind(graph, childPath);
+    const metrics = getNodeMetrics(graph, childPath);
+
+    lines.push(`    ${childNodeId}["${escMermaid(label)}"]`);
+    lines.push(`    style ${childNodeId} fill:#3b2f4a,color:#e9d8fd,stroke:#6b46c1,stroke-width:1.25px`);
+    lines.push(`    ${parentNodeId} --> ${childNodeId}`);
+
+    nodeMeta[childNodeId] = {
+      type: 'component',
+      filePath: childPath,
+      line,
+      kind,
+      metrics,
+      hasChildren,
+      toggleKey: hasChildren ? childKey : undefined
+    };
+
+    if (!hasChildren || !expanded || visited.has(childPath)) {
+      return;
+    }
+
+    const nextVisited = new Set(visited);
+    nextVisited.add(childPath);
+    appendComponentSubtree({
+      lines,
+      nodeMeta,
+      graph,
+      parentNodeId: childNodeId,
+      parentToggleKey: childKey,
+      children: childChildren,
+      visited: nextVisited,
+      ancestryToken: childNodeId
+    });
+  });
+}
+
+function getGraphChildren(graph, filePath) {
+  const childrenByFile = (graph && graph.childrenByFile) || {};
+  return childrenByFile[normalizeFsPath(filePath)] || [];
+}
+
+function getNodeLine(graph, filePath) {
+  const lineByFile = (graph && graph.lineByFile) || {};
+  const line = Number(lineByFile[normalizeFsPath(filePath)] || 1);
+  return Number.isFinite(line) && line > 0 ? line : 1;
+}
+
+function getNodeKind(graph, filePath) {
+  const kindByFile = (graph && graph.kindByFile) || {};
+  return kindByFile[normalizeFsPath(filePath)] || 'dependency';
+}
+
+function getNodeMetrics(graph, filePath) {
+  const metricsByFile = (graph && graph.metricsByFile) || {};
+  const metrics = metricsByFile[normalizeFsPath(filePath)] || { reads: 0, writes: 0, data: 0 };
+  return {
+    reads: Number.isFinite(metrics.reads) ? Number(metrics.reads) : 0,
+    writes: Number.isFinite(metrics.writes) ? Number(metrics.writes) : 0,
+    data: Number.isFinite(metrics.data) ? Number(metrics.data) : 0
+  };
+}
+
+function normalizeFsPath(filePath) {
+  return String(filePath || '').replace(/\\/g, '/');
+}
+
+function formatEndpointLabel(endpoint, route) {
+  if (endpoint.displayName && String(endpoint.displayName).trim().length > 0) {
+    return String(endpoint.displayName).trim();
+  }
+  if (endpoint.operationId && String(endpoint.operationId).trim().length > 0) {
+    return String(endpoint.operationId).trim();
+  }
+  return `${endpoint.method || 'GET'} ${route}`;
+}
+
+function escMermaid(value) {
+  return String(value ?? '').replace(/"/g, '&quot;').replace(/[<>]/g, '');
 }
 
 // ── Middleware Chain ──────────────────────────────────────────────────────────
@@ -419,16 +642,19 @@ function renderDataFlow() {
   const container = document.getElementById('property-list');
   if (!container) return;
   const params = window.ENDPOINT.parameters || [];
+  const dataEvidence = collectEndpointDataLocations(window.ENDPOINT || {});
   const groups = [
     { key: 'path',   icon: '🔑', label: 'Path Parameters',     color: '#dcdcaa' },
     { key: 'query',  icon: '🔍', label: 'Query Parameters',    color: '#9cdcfe' },
     { key: 'body',   icon: '📦', label: 'Request Body Fields', color: '#4ec9b0' },
     { key: 'header', icon: '📋', label: 'Request Headers',     color: '#c586c0' },
     { key: 'cookie', icon: '🍪', label: 'Cookies',             color: '#ce9178' },
+    { key: 'locals', icon: '🧠', label: 'res.locals',          color: '#b5cea8' },
   ];
 
-  let html = groups.map(g => {
+  const paramGroupsHtml = groups.map(g => {
     const items = params.filter(p => p.location === g.key);
+    const counts = countParameterReadsWrites(items);
     const rows = items.map(p => `
       <div class="param-row" data-name="${escAttr(p.name)}">
         <span class="param-name" style="color:${g.color}">${escHtml(p.name)}</span>
@@ -443,24 +669,36 @@ function renderDataFlow() {
           <span>${g.icon}</span>
           <span class="param-group-title">${g.label}</span>
           <span class="param-group-count">${items.length}</span>
-          <span class="param-group-chevron">▼</span>
+          <span class="group-badges">
+            <span class="group-badge read" title="Read count">R ${counts.reads}</span>
+            <span class="group-badge write" title="Write count">W ${counts.writes}</span>
+          </span>
+          <span class="param-group-chevron">▶</span>
         </div>
-        <div class="param-group-body">
+        <div class="param-group-body" style="display:none;">
           ${items.length > 0 ? rows : '<div class="empty-group">None detected</div>'}
         </div>
       </div>`;
   }).join('');
 
+  let html = paramGroupsHtml;
+
   const rb = window.ENDPOINT.requestBody;
   if (rb) {
+    const rbMode = rb.detectionLocation?.accessMode === 'write' ? 'write' : 'read';
     html += `
       <div class="param-group">
         <div class="param-group-header">
           <span>📤</span>
           <span class="param-group-title">Request Body</span>
           <span class="param-group-count">${escHtml(rb.type || 'unknown type')}</span>
+          <span class="group-badges">
+            <span class="group-badge read" title="Read count">R ${rbMode === 'read' ? 1 : 0}</span>
+            <span class="group-badge write" title="Write count">W ${rbMode === 'write' ? 1 : 0}</span>
+          </span>
+          <span class="param-group-chevron">▶</span>
         </div>
-        <div class="param-group-body">
+        <div class="param-group-body" style="display:none;">
           <div class="param-row">
             <span class="param-type">${escHtml(rb.type || '')}</span>
             ${rb.schema ? `<span class="param-desc">${escHtml(rb.schema)}</span>` : ''}
@@ -469,6 +707,24 @@ function renderDataFlow() {
         </div>
       </div>`;
   }
+
+  const dataGroupsHtml = renderDetectedDataGroups(dataEvidence);
+  html += `
+    <div class="param-group">
+      <div class="param-group-header">
+        <span>🧠</span>
+        <span class="param-group-title">Detected Data Usage</span>
+        <span class="param-group-count">${dataEvidence.length}</span>
+        <span class="group-badges">
+          <span class="group-badge read" title="Read count">R ${dataEvidence.filter((d) => d.mode === 'read').length}</span>
+          <span class="group-badge write" title="Write count">W ${dataEvidence.filter((d) => d.mode === 'write').length}</span>
+        </span>
+        <span class="param-group-chevron">▶</span>
+      </div>
+      <div class="param-group-body" style="display:none;">
+        ${dataGroupsHtml}
+      </div>
+    </div>`;
 
   container.innerHTML = html;
 
@@ -484,6 +740,66 @@ function renderDataFlow() {
   });
 }
 
+function countParameterReadsWrites(params) {
+  let reads = 0;
+  let writes = 0;
+  (params || []).forEach((param) => {
+    const locs = normalizeParameterLocations(param);
+    reads += locs.read.length;
+    writes += locs.write.length;
+  });
+  return { reads, writes };
+}
+
+function renderDetectedDataGroups(entries) {
+  if (!entries || entries.length === 0) {
+    return '<div class="empty-group">No data evidence detected</div>';
+  }
+
+  const grouped = new Map();
+  entries.forEach((entry) => {
+    const key = entry.source || 'unknown';
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(entry);
+  });
+
+  const blocks = [];
+  for (const [source, items] of grouped.entries()) {
+    const readCount = items.filter((item) => item.mode === 'read').length;
+    const writeCount = items.filter((item) => item.mode === 'write').length;
+    blocks.push(`
+      <div class="param-group nested-param-group">
+        <div class="param-group-header">
+          <span>📌</span>
+          <span class="param-group-title">${escHtml(source)}</span>
+          <span class="param-group-count">${items.length}</span>
+          <span class="group-badges">
+            <span class="group-badge read" title="Read count">R ${readCount}</span>
+            <span class="group-badge write" title="Write count">W ${writeCount}</span>
+          </span>
+          <span class="param-group-chevron">▶</span>
+        </div>
+        <div class="param-group-body" style="display:none;">
+          ${items.map((item) => `
+            <div class="param-row data-row" data-name="${escAttr(item.name || source)}">
+              <span class="param-name">${escHtml(item.name || 'value')}</span>
+              <span class="param-item-loc">${escHtml(item.mode)}</span>
+              <div class="clickable-file param-loc-link" onclick="navigate('${escAttrOnclick(item.filePath)}',${item.line})">
+                <code>${escHtml(shortPath(item.filePath))}</code>
+                <span class="line-badge">:${item.line}</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `);
+  }
+
+  return blocks.join('');
+}
+
 function setupSearch() {
   const input = document.getElementById('property-search');
   if (!input) return;
@@ -492,7 +808,7 @@ function setupSearch() {
     clearTimeout(t);
     t = setTimeout(() => {
       const q = e.target.value.toLowerCase();
-      document.querySelectorAll('.param-row').forEach(row => {
+      document.querySelectorAll('.param-row, .data-row').forEach(row => {
         row.style.display = !q || (row.dataset.name || '').toLowerCase().includes(q) ? '' : 'none';
       });
     }, 150);
@@ -637,92 +953,314 @@ function buildHttpSnippet() {
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 function setupSidebar() {
   document.getElementById('close-sidebar')?.addEventListener('click', closeSidebar);
+  document.getElementById('sidebar-back-btn')?.addEventListener('click', () => {
+    goSidebarBack();
+  });
+  updateSidebarBackButton();
 }
 
 function openSidebarForMiddleware(idx) {
   const mw = (window.ENDPOINT.middleware || [])[idx];
   if (!mw) return;
+  const graph = window.COMPONENT_GRAPH || {};
+  const endpoint = window.ENDPOINT || {};
   const short = mw.name.replace(/\\/g, '/').split('/').pop() || mw.name;
-  const locHtml = mw.location
-    ? `<div class="clickable-file" onclick="navigate('${escAttrOnclick(mw.location.filePath)}',${mw.location.line})">
-         <code>${escHtml(shortPath(mw.location.filePath))}</code>
-         <span class="line-badge">:${mw.location.line}</span>
-       </div>`
-    : '<div class="no-params">Location not resolved</div>';
+  const mwPath = normalizeFsPath((mw.location && mw.location.filePath) || '');
+  const mwLine = Number((mw.location && mw.location.line) || 1);
+  const children = mwPath ? getGraphChildren(graph, mwPath) : [];
 
-  const params = window.ENDPOINT.parameters || [];
-  const paramsHtml = params.length > 0
-    ? params.map(p => `
-        <div class="param-item">
-          <div class="param-item-name">${escHtml(p.name)}</div>
-          <div class="param-item-meta">
-            <span class="param-item-loc">${p.location}</span>
-            ${p.type ? `<span class="param-item-type">${escHtml(p.type)}</span>` : ''}
-            ${p.required ? '<span class="param-required">required</span>' : ''}
-          </div>
-        </div>`).join('')
-    : '<div class="no-params">No parameters detected</div>';
+  const endpointData = collectEndpointDataLocations(endpoint);
+  const localData = endpointData.filter((entry) => normalizeFsPath(entry.filePath) === mwPath);
+  const localReads = localData.filter((entry) => entry.mode === 'read');
+  const localWrites = localData.filter((entry) => entry.mode === 'write');
 
   setSidebar(short, `
+    ${renderSidebarFileSection('📁 File', mwPath, mwLine)}
     <div class="sb-section">
-      <div class="sb-section-title">📁 File</div>
-      ${locHtml}
+      <div class="sb-section-title">ℹ️ Middleware</div>
+      <div class="sb-kv-list">
+        <div class="sb-kv"><span>Order</span><strong>${idx + 1}/${(endpoint.middleware || []).length}</strong></div>
+        <div class="sb-kv"><span>Name</span><code>${escHtml(mw.name)}</code></div>
+        <div class="sb-kv"><span>Sub-components</span><strong>${children.length}</strong></div>
+      </div>
     </div>
+    ${renderCollapsibleSection('📦 Components', renderFileList(children), children.length > 0, true)}
+    ${renderCollapsibleSection('👁️ Input Data', renderDataGroups(localReads), localReads.length > 0, true)}
+    ${renderCollapsibleSection('✏️ Output Data', renderDataGroups(localWrites), localWrites.length > 0, true)}
     <div class="sb-section">
-      <div class="sb-section-title">📋 Endpoint Parameters</div>
-      ${paramsHtml}
-    </div>`);
+      <div class="sb-section-title">🧭 Endpoint Context</div>
+      <div class="sb-kv-list">
+        <div class="sb-kv"><span>Method</span><strong>${escHtml(endpoint.method || 'GET')}</strong></div>
+        <div class="sb-kv"><span>Path</span><code>${escHtml(endpoint.resolvedPath || endpoint.pathExpression || '/')}</code></div>
+        <div class="sb-kv"><span>Framework</span><strong>${escHtml(endpoint.framework || 'unknown')}</strong></div>
+        <div class="sb-kv"><span>Confidence</span><strong>${escHtml(endpoint.confidence || 'unknown')}</strong></div>
+      </div>
+    </div>`, { viewKey: `middleware:${idx}` });
 }
 
 function openSidebarForHandler() {
-  const hf = window.ENDPOINT.handlerLocation;
+  const endpoint = window.ENDPOINT || {};
+  const hf = endpoint.handlerLocation || {};
+  const handlerPath = normalizeFsPath(hf.filePath || '');
+  const handlerLine = Number(hf.line || 1);
+  const endpointData = collectEndpointDataLocations(endpoint);
+  const localData = endpointData.filter((entry) => normalizeFsPath(entry.filePath) === handlerPath);
+  const localReads = localData.filter((entry) => entry.mode === 'read');
+  const localWrites = localData.filter((entry) => entry.mode === 'write');
+  const middlewareList = endpoint.middleware || [];
+
   setSidebar(hf.symbolName || 'Handler', `
+    ${renderSidebarFileSection('📁 File', handlerPath, handlerLine)}
     <div class="sb-section">
-      <div class="sb-section-title">📁 File</div>
-      <div class="clickable-file" onclick="navigate('${escAttrOnclick(hf.filePath)}',${hf.line})">
-        <code>${escHtml(shortPath(hf.filePath))}</code>
-        <span class="line-badge">:${hf.line}</span>
+      <div class="sb-section-title">ℹ️ Handler</div>
+      <div class="sb-kv-list">
+        <div class="sb-kv"><span>Symbol</span><strong>${escHtml(hf.symbolName || 'anonymous')}</strong></div>
+        <div class="sb-kv"><span>Framework</span><strong>${escHtml(endpoint.framework || 'unknown')}</strong></div>
+        <div class="sb-kv"><span>Confidence</span><strong>${escHtml(endpoint.confidence || 'unknown')}</strong></div>
       </div>
     </div>
-    <div class="sb-section">
-      <div class="sb-section-title">ℹ️ Info</div>
-      <div style="font-size:12px;display:flex;flex-direction:column;gap:4px">
-        <div>Framework: <strong>${escHtml(window.ENDPOINT.framework)}</strong></div>
-        <div>Confidence: <strong>${escHtml(window.ENDPOINT.confidence)}</strong></div>
-        <div>Hint: <strong>double-click tree nodes to open source</strong></div>
-      </div>
-    </div>`);
+    ${renderCollapsibleSection('👁️ Input Data', renderDataGroups(localReads), localReads.length > 0, true)}
+    ${renderCollapsibleSection('✏️ Output Data', renderDataGroups(localWrites), localWrites.length > 0, true)}
+    ${renderCollapsibleSection(
+      '🔗 Middleware Chain',
+      middlewareList.length > 0
+        ? middlewareList.map((mw, i) => {
+            const loc = mw.location || {};
+            return `<div class="clickable-file" onclick="navigate('${escAttrOnclick(loc.filePath || '')}',${Number(loc.line || 1)})"><code>${i + 1}. ${escHtml((mw.name || '').replace(/\\/g, '/').split('/').pop() || mw.name || 'middleware')}</code><span class="line-badge">:${Number(loc.line || 1)}</span></div>`;
+          }).join('')
+        : '<div class="no-params">No middleware detected</div>',
+      true,
+      true
+    )}`, { viewKey: 'handler' });
 }
 
 function openSidebarForComponentNode(filePath, line, kind, hasChildren, metrics) {
   const name = shortPath(filePath);
   const kindText = kindLabel(kind || 'dependency');
   const m = metrics || { reads: 0, writes: 0, data: 0 };
+  const graph = window.COMPONENT_GRAPH || {};
+  const normalizedPath = normalizeFsPath(filePath);
+  const children = getGraphChildren(graph, normalizedPath);
+  const parents = getGraphParents(graph, normalizedPath);
+  const endpointData = collectEndpointDataLocations(window.ENDPOINT || {});
+  const localData = endpointData.filter((entry) => normalizeFsPath(entry.filePath) === normalizedPath);
+  const localReads = localData.filter((entry) => entry.mode === 'read');
+  const localWrites = localData.filter((entry) => entry.mode === 'write');
+
   setSidebar(name || 'Component', `
+    ${renderSidebarFileSection('📁 File', normalizedPath, line || 1)}
     <div class="sb-section">
-      <div class="sb-section-title">📁 File</div>
-      <div class="clickable-file" onclick="navigate('${escAttrOnclick(filePath)}',${line || 1})">
-        <code>${escHtml(name)}</code>
-        <span class="line-badge">:${line || 1}</span>
+      <div class="sb-section-title">ℹ️ Component</div>
+      <div class="sb-kv-list">
+        <div class="sb-kv"><span>Type</span><strong>${escHtml(kindText)}</strong></div>
+        <div class="sb-kv"><span>Parents</span><strong>${parents.length}</strong></div>
+        <div class="sb-kv"><span>Children</span><strong>${children.length}</strong></div>
+        <div class="sb-kv"><span>Reads / Writes / Data</span><strong>${m.reads} / ${m.writes} / ${m.data}</strong></div>
       </div>
     </div>
-    <div class="sb-section">
-      <div class="sb-section-title">ℹ️ Node</div>
-      <div style="font-size:12px;display:flex;flex-direction:column;gap:4px">
-        <div>Type: <strong>${escHtml(kindText)}</strong></div>
-        <div>Has subcomponents: <strong>${hasChildren ? 'yes' : 'no'}</strong></div>
-        <div>Reads: <strong>${m.reads}</strong> · Writes: <strong>${m.writes}</strong> · Data: <strong>${m.data}</strong></div>
-        <div>Action: <strong>double-click to open source</strong></div>
-      </div>
-    </div>`);
+    ${renderCollapsibleSection('⬆️ Parents', renderFileList(parents), parents.length > 0, false)}
+    ${renderCollapsibleSection('⬇️ Sub-components', renderFileList(children), children.length > 0, true)}
+    ${renderCollapsibleSection('👁️ Input Data', renderDataGroups(localReads), localReads.length > 0, true)}
+    ${renderCollapsibleSection('✏️ Output Data', renderDataGroups(localWrites), localWrites.length > 0, true)}
+  `, { viewKey: `component:${normalizedPath}` });
 }
 
-function setSidebar(title, content) {
-  document.getElementById('sidebar-title').textContent = title;
+function renderSidebarFileSection(title, filePath, line) {
+  if (!filePath) {
+    return `<div class="sb-section"><div class="sb-section-title">${title}</div><div class="no-params">Location not resolved</div></div>`;
+  }
+
+  return `<div class="sb-section">
+    <div class="sb-section-title">${title}</div>
+    <div class="clickable-file" onclick="navigate('${escAttrOnclick(filePath)}',${Number(line || 1)})">
+      <code>${escHtml(shortPath(filePath))}</code>
+      <span class="line-badge">:${Number(line || 1)}</span>
+    </div>
+  </div>`;
+}
+
+function renderCollapsibleSection(title, content, hasContent, openByDefault) {
+  const body = hasContent ? content : '<div class="no-params">None</div>';
+  return `<details class="sb-collapsible" ${openByDefault ? 'open' : ''}>
+    <summary>${escHtml(title)}</summary>
+    <div class="sb-collapsible-body">${body}</div>
+  </details>`;
+}
+
+function renderFileList(filePaths) {
+  if (!Array.isArray(filePaths) || filePaths.length === 0) {
+    return '<div class="no-params">None</div>';
+  }
+
+  return filePaths.map((fp) => {
+    const line = getNodeLine(window.COMPONENT_GRAPH || {}, fp);
+    return `<div class="clickable-file" onclick="navigate('${escAttrOnclick(fp)}',${line})">
+      <code>${escHtml(shortPath(fp))}</code>
+      <span class="line-badge">:${line}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderDataGroups(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return '<div class="no-params">No local data evidence for this node</div>';
+  }
+
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = entry.source || 'unknown';
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(entry);
+  }
+
+  const sections = [];
+  for (const [source, items] of groups.entries()) {
+    const rows = items.map((item) => `<div class="clickable-file" onclick="navigate('${escAttrOnclick(item.filePath)}',${item.line})">
+      <code>${escHtml(item.name || 'value')}</code>
+      <span class="param-item-loc">${escHtml(source)}</span>
+      <span class="line-badge">:${item.line}</span>
+    </div>`).join('');
+    sections.push(`<div class="sb-data-group"><div class="sb-data-group-title">${escHtml(source)} (${items.length})</div>${rows}</div>`);
+  }
+
+  return sections.join('');
+}
+
+function collectEndpointDataLocations(endpoint) {
+  const rows = [];
+  const params = endpoint.parameters || [];
+  for (const p of params) {
+    const norm = normalizeParameterLocations(p);
+    const source = p.location === 'locals' ? 'res.locals' : `req.${p.location}`;
+    norm.read.forEach((loc) => rows.push({ source, name: p.name, mode: 'read', filePath: loc.filePath, line: loc.line }));
+    norm.write.forEach((loc) => rows.push({ source, name: p.name, mode: 'write', filePath: loc.filePath, line: loc.line }));
+  }
+
+  const requestBody = endpoint.requestBody;
+  if (requestBody && requestBody.detectionLocation && requestBody.detectionLocation.filePath) {
+    rows.push({
+      source: 'req.body',
+      name: requestBody.schema || requestBody.type || 'requestBody',
+      mode: (requestBody.detectionLocation.accessMode === 'write' ? 'write' : 'read'),
+      filePath: requestBody.detectionLocation.filePath,
+      line: Number(requestBody.detectionLocation.line || 1)
+    });
+  }
+
+  const cookies = endpoint.cookies || [];
+  for (const c of cookies) {
+    if (!c.detectionLocation || !c.detectionLocation.filePath) continue;
+    const fallback = c.type === 'response' ? 'write' : 'read';
+    rows.push({
+      source: c.type === 'response' ? 'res.cookie' : 'req.cookie',
+      name: c.name,
+      mode: c.detectionLocation.accessMode === 'write' ? 'write' : (c.detectionLocation.accessMode === 'read' ? 'read' : fallback),
+      filePath: c.detectionLocation.filePath,
+      line: Number(c.detectionLocation.line || 1)
+    });
+  }
+
+  const responses = endpoint.responses || [];
+  for (const response of responses) {
+    const headers = response.headers || [];
+    for (const header of headers) {
+      if (!header.detectionLocation || !header.detectionLocation.filePath) continue;
+      rows.push({
+        source: 'res.header',
+        name: header.name,
+        mode: header.detectionLocation.accessMode === 'read' ? 'read' : 'write',
+        filePath: header.detectionLocation.filePath,
+        line: Number(header.detectionLocation.line || 1)
+      });
+    }
+  }
+
+  return dedupeDataRows(rows);
+}
+
+function dedupeDataRows(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const key = `${normalizeFsPath(row.filePath)}:${row.line}:${row.mode}:${row.source}:${row.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...row, filePath: normalizeFsPath(row.filePath), line: Number(row.line || 1) });
+  }
+  return out;
+}
+
+function getGraphParents(graph, filePath) {
+  const target = normalizeFsPath(filePath);
+  const byFile = (graph && graph.childrenByFile) || {};
+  const parents = [];
+  Object.keys(byFile).forEach((parent) => {
+    const children = byFile[parent] || [];
+    if (children.includes(target)) {
+      parents.push(parent);
+    }
+  });
+  return parents;
+}
+
+function setSidebar(title, content, options = {}) {
+  const { viewKey = title, fromHistory = false } = options;
+
+  if (!fromHistory && state.sidebar.current) {
+    state.sidebar.history.push(state.sidebar.current);
+  }
+
+  state.sidebar.current = { title, content, viewKey };
+  renderSidebarHeader();
   document.getElementById('sidebar-content').innerHTML = content;
   document.getElementById('detail-sidebar').classList.add('open');
+  updateSidebarBackButton();
 }
-function closeSidebar() { document.getElementById('detail-sidebar').classList.remove('open'); }
+
+function goSidebarBack() {
+  if (state.sidebar.history.length === 0) {
+    return;
+  }
+
+  const previous = state.sidebar.history.pop();
+  if (!previous) {
+    return;
+  }
+
+  setSidebar(previous.title, previous.content, { viewKey: previous.viewKey, fromHistory: true });
+}
+
+function updateSidebarBackButton() {
+  const backBtn = document.getElementById('sidebar-back-btn');
+  if (!(backBtn instanceof HTMLButtonElement)) {
+    return;
+  }
+
+  const hasHistory = state.sidebar.history.length > 0;
+  backBtn.disabled = !hasHistory;
+  backBtn.title = hasHistory ? 'Back' : 'No previous view';
+}
+
+function renderSidebarHeader() {
+  const titleEl = document.getElementById('sidebar-title');
+  const breadcrumbEl = document.getElementById('sidebar-breadcrumb');
+  if (!titleEl || !breadcrumbEl) {
+    return;
+  }
+
+  const currentTitle = (state.sidebar.current && state.sidebar.current.title) || 'Detail';
+  titleEl.textContent = currentTitle;
+
+  const fullTrail = [...state.sidebar.history.map((item) => item.title), currentTitle];
+  const trail = fullTrail.length > 4 ? ['...', ...fullTrail.slice(-4)] : fullTrail;
+  breadcrumbEl.textContent = trail.join(' > ');
+}
+
+function closeSidebar() {
+  document.getElementById('detail-sidebar').classList.remove('open');
+}
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function navigate(filePath, line) {
