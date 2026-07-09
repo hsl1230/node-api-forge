@@ -2,8 +2,9 @@
   "name": "node-api-forge",
   "displayName": "Node API Forge",
   "description": "Discover, test, and document Node APIs without Swagger—no app integration, full testing workflows, pure source-to-API in seconds.",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "publisher": "henry-huang",
+  "icon": "resources/icon.png",
   "license": "MIT",
   "keywords": [
     "swagger alternative",
@@ -53,16 +54,6 @@
     "color": "#1e1e2e",
     "theme": "dark"
   },
-  "activationEvents": [
-    "onView:nodeApiForge.apiExplorer",
-    "onCommand:nodeApiForge.discoverApis",
-    "onCommand:nodeApiForge.openEndpointInHttpForge",
-    "onCommand:nodeApiForge.openEndpointSource",
-    "onCommand:nodeApiForge.copyEndpointRequest",
-    "onCommand:nodeApiForge.exportDiscoveredCollection",
-    "onCommand:nodeApiForge.showEndpointFlow",
-    "onCommand:nodeApiForge.hardRefreshWorkspace"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -194,6 +185,13 @@
           },
           "default": [],
           "description": "Library package names that Flow Search may traverse as part of endpoint component-tree expansion (for example internal shared libs that handle params/headers). Non-allowlisted external libraries are treated as traversal boundaries."
+        },
+        "nodeApiForge.apiExplorerFrameworkPageSize": {
+          "type": "number",
+          "default": 200,
+          "minimum": 25,
+          "maximum": 1000,
+          "description": "Maximum endpoints to render per API Explorer framework page when a framework has many endpoints. Larger values show fewer pages but can increase expansion time."
         }
       }
     }

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { formatEndpointDisplayLabel } from '../discovery/endpoint-display';
 import { ApiEndpoint, SourceLocation } from '../discovery/types';
 
 interface PathAliasEntry {
@@ -84,8 +85,7 @@ export class FlowDiagramPanel {
     extensionUri: vscode.Uri,
     onHardRefresh?: (endpoint: ApiEndpoint) => Promise<ApiEndpoint | undefined>
   ): FlowDiagramPanel {
-    const route = endpoint.resolvedPath ?? endpoint.pathExpression;
-    const title = `Flow: ${endpoint.method} ${route}`;
+    const title = `Flow: ${formatEndpointDisplayLabel(endpoint)}`;
     const resourceRoot = vscode.Uri.joinPath(extensionUri, 'resources', 'features', 'flow-analyzer');
     const panel = vscode.window.createWebviewPanel(
       FlowDiagramPanel.VIEW_TYPE,
@@ -121,8 +121,7 @@ export class FlowDiagramPanel {
       }
 
       this.endpoint = refreshedEndpoint;
-      const route = refreshedEndpoint.resolvedPath ?? refreshedEndpoint.pathExpression;
-      this.panel.title = `Flow: ${refreshedEndpoint.method} ${route}`;
+      this.panel.title = `Flow: ${formatEndpointDisplayLabel(refreshedEndpoint)}`;
       this.render();
     } catch (error) {
       await this.panel.webview.postMessage({ command: 'hardRefreshDone', success: false });

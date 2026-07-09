@@ -1,6 +1,8 @@
-# Node API Forge
-
 <div align="center">
+
+<img src="https://raw.githubusercontent.com/hsl1230/node-api-forge/main/resources/icon.png" alt="Node API Forge" width="120"/>
+
+# Node API Forge
 
 **Discover, test, and document Node APIs without Swagger.**
 
@@ -41,6 +43,7 @@ Supported frameworks: Express, NestJS, and Fastify.
 
 - Discover Express, NestJS, and Fastify endpoints directly from source instead of manually curating requests.
 - Open endpoints in HTTP Forge with method, path, params, headers, and body context already mapped.
+- Browse APIs in a scalable explorer hierarchy (project -> framework -> endpoint), with automatic framework paging for very large endpoint sets.
 - Trace endpoint flow across 5 tabs: Mermaid flow diagram, ordered middleware chain, component tree, parameter data flow with click-to-source navigation, and a documentation/HTTP snippet view.
 - Export discovered endpoints as organized HTTP Forge collections grouped by project and framework.
 - Support multi-project workspaces and custom seed loaders for routes that cannot be auto-discovered from source.
@@ -65,7 +68,8 @@ Supported frameworks: Express, NestJS, and Fastify.
 	"nodeApiForge.frameworks": ["auto"],
 	"nodeApiForge.customSeedLoaderModulePath": "./node-api-forge-generic-loader.js",
 	"nodeApiForge.autoRefreshOnFileChanges": true,
-	"nodeApiForge.searchComponentLibAllowlist": []
+	"nodeApiForge.searchComponentLibAllowlist": [],
+	"nodeApiForge.apiExplorerFrameworkPageSize": 200
 }
 ```
 
@@ -77,6 +81,7 @@ Supported frameworks: Express, NestJS, and Fastify.
 | `nodeApiForge.customSeedLoaderModulePath` | `string` | `""` | Optional JS module that exports `loadSeedManifestEndpoints(projectRoot, context)`. |
 | `nodeApiForge.autoRefreshOnFileChanges` | `boolean` | `true` | Automatically reruns discovery on relevant source/config changes. |
 | `nodeApiForge.searchComponentLibAllowlist` | `string[]` | `[]` | External/internal library packages Flow Search is allowed to traverse. |
+| `nodeApiForge.apiExplorerFrameworkPageSize` | `number` | `200` | Endpoints per framework page in API Explorer for large endpoint sets (range `25` to `1000`). |
 
 ## Docs
 

@@ -77,6 +77,7 @@ export interface DiscoveryWarning {
     | 'provider-failed'
     | 'dynamic-path-unresolved'
     | 'parameter-type-conflict'
+    | 'component-dependency-limit-reached'
     | 'seed-manifest-invalid'
     | 'seed-endpoint-unmatched'
     | 'seed-loader-failed'
@@ -92,6 +93,9 @@ export interface DiscoveryStats {
   endpointCount: number;
   unresolvedEndpointCount: number;
   scanDurationMs: number;
+  parameterCacheReusedEndpoints?: number;
+  parameterCacheRecomputedEndpoints?: number;
+  parameterTraversalTruncatedEndpoints?: number;
 }
 
 export interface DiscoveryResult {

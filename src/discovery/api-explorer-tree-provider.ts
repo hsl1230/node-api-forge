@@ -1,8 +1,15 @@
 import * as vscode from 'vscode';
 import { DISCOVER_APIS_COMMAND_ID, OPEN_HTTP_FORGE_COMMAND_ID } from '../commands';
 import { ApiDiscoveryEngine } from './discovery-engine';
+import { formatEndpointDisplayLabel } from './endpoint-display';
 import { resolveProjectName } from './project-name';
 import { ApiEndpoint, ApiFramework, DiscoveryContext, DiscoveryResult } from './types';
+
+type ExplorerNodeData =
+  | { kind: 'project'; projectName: string; endpoints: ApiEndpoint[] }
+  | { kind: 'framework'; framework: ApiFramework; endpoints: ApiEndpoint[] }
+  | { kind: 'framework-page'; framework: ApiFramework; endpoints: ApiEndpoint[]; offset: number; limit: number }
+  | { kind: 'endpoint'; endpoint: ApiEndpoint };
 
 export class ApiExplorerTreeProvider implements vscode.TreeDataProvider<ApiExplorerTreeItem> {
   private readonly changeEmitter = new vscode.EventEmitter<ApiExplorerTreeItem | undefined | void>();
@@ -30,6 +37,10 @@ export class ApiExplorerTreeProvider implements vscode.TreeDataProvider<ApiExplo
     return this.lastResult;
   }
 
+  public refreshTree(): void {
+    this.changeEmitter.fire();
+  }
+
   getTreeItem(element: ApiExplorerTreeItem): vscode.TreeItem {
     return element;
   }
@@ -47,34 +58,82 @@ export class ApiExplorerTreeProvider implements vscode.TreeDataProvider<ApiExplo
         return Object.entries(projectGroups).map(([project, projectEndpoints]) => {
           const item = new ApiExplorerTreeItem(
             `${project} (${projectEndpoints.length})`,
-            vscode.TreeItemCollapsibleState.Expanded
+            vscode.TreeItemCollapsibleState.Collapsed
           );
           item.contextValue = 'projectGroup';
-          const frameworks = groupByFramework(projectEndpoints);
-          item.children = Object.entries(frameworks)
-            .filter(([, endpoints]) => endpoints.length > 0)
-            .map(([framework, endpoints]) => {
-              const frameworkItem = new ApiExplorerTreeItem(
-                `${framework.toUpperCase()} (${endpoints.length})`,
-                vscode.TreeItemCollapsibleState.Collapsed
-              );
-              frameworkItem.contextValue = 'frameworkGroup';
-              frameworkItem.children = endpoints.map((endpoint, index) => {
-                try {
-                  return new EndpointTreeItem(endpoint);
-                } catch (error) {
-                  const message = error instanceof Error ? error.message : String(error);
-                  const badEndpoint = new ApiExplorerTreeItem(
-                    `Invalid endpoint #${index + 1}: ${message}`,
-                    vscode.TreeItemCollapsibleState.None
-                  );
-                  badEndpoint.contextValue = 'endpointError';
-                  return badEndpoint;
-                }
-              });
-              return frameworkItem;
-            });
+          item.data = { kind: 'project', projectName: project, endpoints: projectEndpoints };
           return item;
+        });
+      }
+
+      if (element.data?.kind === 'project') {
+        const frameworks = groupByFramework(element.data.endpoints);
+        return Object.entries(frameworks)
+          .filter(([, endpoints]) => endpoints.length > 0)
+          .map(([framework, endpoints]) => {
+            const frameworkItem = new ApiExplorerTreeItem(
+              `${framework.toUpperCase()} (${endpoints.length})`,
+              vscode.TreeItemCollapsibleState.Collapsed
+            );
+            frameworkItem.contextValue = 'frameworkGroup';
+            frameworkItem.data = { kind: 'framework', framework: framework as ApiFramework, endpoints };
+            return frameworkItem;
+          });
+      }
+
+      if (element.data?.kind === 'framework') {
+        const pageSize = getFrameworkEndpointPageSize();
+        if (element.data.endpoints.length > pageSize) {
+          const pageItems: ApiExplorerTreeItem[] = [];
+          for (let offset = 0; offset < element.data.endpoints.length; offset += pageSize) {
+            const end = Math.min(offset + pageSize, element.data.endpoints.length);
+            const pageItem = new ApiExplorerTreeItem(
+              `Endpoints ${offset + 1}-${end}`,
+              vscode.TreeItemCollapsibleState.Collapsed
+            );
+            pageItem.contextValue = 'frameworkPage';
+            pageItem.data = {
+              kind: 'framework-page',
+              framework: element.data.framework,
+              endpoints: element.data.endpoints,
+              offset,
+              limit: pageSize
+            };
+            pageItems.push(pageItem);
+          }
+          return pageItems;
+        }
+
+        return element.data.endpoints.map((endpoint, index) => {
+          try {
+            return new EndpointTreeItem(endpoint);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const badEndpoint = new ApiExplorerTreeItem(
+              `Invalid endpoint #${index + 1}: ${message}`,
+              vscode.TreeItemCollapsibleState.None
+            );
+            badEndpoint.contextValue = 'endpointError';
+            return badEndpoint;
+          }
+        });
+      }
+
+      if (element.data?.kind === 'framework-page') {
+        const pageData = element.data;
+        const slice = pageData.endpoints.slice(pageData.offset, pageData.offset + pageData.limit);
+        return slice.map((endpoint, index) => {
+          try {
+            return new EndpointTreeItem(endpoint);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const badEndpoint = new ApiExplorerTreeItem(
+              `Invalid endpoint #${pageData.offset + index + 1}: ${message}`,
+              vscode.TreeItemCollapsibleState.None
+            );
+            badEndpoint.contextValue = 'endpointError';
+            return badEndpoint;
+          }
         });
       }
 
@@ -89,6 +148,7 @@ export class ApiExplorerTreeProvider implements vscode.TreeDataProvider<ApiExplo
 
 class ApiExplorerTreeItem extends vscode.TreeItem {
   public children?: ApiExplorerTreeItem[];
+  public data?: ExplorerNodeData;
 
   constructor(label: string, collapsibleState: vscode.TreeItemCollapsibleState) {
     super(label, collapsibleState);
@@ -97,7 +157,7 @@ class ApiExplorerTreeItem extends vscode.TreeItem {
 
 class EndpointTreeItem extends ApiExplorerTreeItem {
   constructor(private readonly endpoint: ApiEndpoint) {
-    super(formatLabel(endpoint), vscode.TreeItemCollapsibleState.None);
+    super(formatEndpointDisplayLabel(endpoint), vscode.TreeItemCollapsibleState.None);
     this.contextValue = 'endpoint';
     this.description = `${endpoint.confidence} confidence`;
     this.command = {
@@ -137,12 +197,15 @@ function groupByProject(endpoints: ApiEndpoint[], context?: DiscoveryContext): R
   );
 }
 
-function formatLabel(endpoint: ApiEndpoint): string {
-  const method = endpoint.method ?? 'UNKNOWN';
-  const customDisplayName = (endpoint as { displayName?: unknown }).displayName;
-  if (typeof customDisplayName === 'string' && customDisplayName.trim().length > 0) {
-    return `${method} ${customDisplayName.trim()}`;
+function getFrameworkEndpointPageSize(): number {
+  const configured = vscode.workspace
+    .getConfiguration('nodeApiForge')
+    .get<number>('apiExplorerFrameworkPageSize', 200);
+
+  if (!Number.isFinite(configured)) {
+    return 200;
   }
-  const resolved = endpoint.resolvedPath ?? endpoint.pathExpression ?? '<missing-path>';
-  return `${method} ${resolved}`;
+
+  const normalized = Math.trunc(configured);
+  return Math.min(1000, Math.max(25, normalized));
 }

@@ -2,17 +2,17 @@
 
 ## Overview
 
-Node API Forge already has framework-specific discovery providers for Express, NestJS, and Fastify. The next step is to make the Express and Fastify parts behave like real component analyzers, similar to the analyzer split used in AGL Essentials.
+Node API Forge uses framework-specific providers for Express, NestJS, and Fastify with a shared discovery engine. The architecture already separates route discovery from cross-cutting concerns such as endpoint grouping, parameter enrichment, export shaping, and incremental cache reuse.
 
-The goal is to separate the concerns that are currently mixed inside the providers:
+The core responsibilities are split across:
 
 - route and component discovery
-- nested prefix propagation
-- path resolution and placeholder handling
-- middleware extraction
-- framework-specific normalization
+- project-aware endpoint grouping
+- parameter extraction and merge from dependency trees
+- cache invalidation and incremental recomputation
+- UI-facing tree shaping for large endpoint sets
 
-## Proposed Module Split
+## Current Module Split
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -22,27 +22,26 @@ The goal is to separate the concerns that are currently mixed inside the provide
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         ApiDiscoveryEngine                              │
-│                  Orchestrates providers and results                    │
+│                         ApiDiscoveryEngine                             │
+│      Orchestrates providers, seed merge, enrichment, and caches       │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    Framework Component Analyzers                        │
+│                    Framework Discovery Providers                        │
 │                                                                         │
 │  ┌──────────────────────────┐  ┌─────────────────────────────────────┐ │
-│  │ ExpressComponentAnalyzer  │  │ FastifyComponentAnalyzer            │ │
-│  │ - router graph building   │  │ - plugin graph building             │ │
-│  │ - app.use/router.use      │  │ - register() prefix propagation     │ │
-│  │ - route() handler lookup  │  │ - route() object route extraction   │ │
-│  │ - middleware capture      │  │ - middleware capture                │ │
+│  │ ExpressDiscoveryProvider │  │ FastifyDiscoveryProvider            │ │
+│  │ - router traversal        │  │ - plugin/register traversal         │ │
+│  │ - route extraction        │  │ - route extraction                  │ │
+│  │ - middleware capture      │  │ - middleware/hook capture           │ │
 │  └──────────────────────────┘  └─────────────────────────────────────┘ │
 │                                                                         │
 │  ┌──────────────────────────┐  ┌─────────────────────────────────────┐ │
-│  │ NestControllerAnalyzer    │  │ Shared AST / Path Utilities         │ │
-│  │ - decorators              │  │ - source collection                 │ │
-│  │ - controller prefixes     │  │ - resolution context                │ │
-│  │ - method decorators       │  │ - path joining / placeholder logic  │ │
+│  │ NestDiscoveryProvider    │  │ Shared AST / Path Utilities         │ │
+│  │ - decorators             │  │ - source collection                 │ │
+│  │ - controller + method    │  │ - path joining / placeholder logic  │ │
+│  │ - route normalization     │  │ - handler location resolution       │ │
 │  └──────────────────────────┘  └─────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -53,118 +52,55 @@ The goal is to separate the concerns that are currently mixed inside the provide
                        └────────────────────────────┘
 ```
 
-## Why This Split
+## Discovery Engine Responsibilities
 
-Express and Fastify do not map to the same analysis model:
+The discovery engine layers shared behavior on top of provider output:
 
-- Express is router-heavy and usually needs mount graph traversal.
-- Fastify is plugin-heavy and usually needs register-tree traversal.
-- NestJS is decorator-driven and should remain its own path.
+- merges provider endpoints with custom seed loader endpoints
+- keeps project-aware grouping information for tree and export
+- enriches endpoint parameters from component/dependency scans
+- tracks and reuses cached parameter results for unchanged endpoints
+- invalidates affected caches on file changes or hard refresh
 
-If the logic stays inside the providers, the code becomes harder to test because route detection, graph traversal, and output shaping are coupled together. A dedicated analyzer layer keeps the providers thin and makes each framework easier to evolve.
+This keeps framework traversal logic inside providers while preserving consistent output behavior across frameworks.
 
-## Responsibilities
+## Incremental Caching Model
 
-### ExpressComponentAnalyzer
+Node API Forge uses layered caches to keep refreshes fast on large workspaces:
 
-Owns Express-specific component analysis.
+- provider-level file signature checks (mtime and size)
+- component dependency graph cache by project root
+- per-file component analysis cache (dependencies + extracted parameters)
+- reverse dependency map to find affected endpoints quickly
+- endpoint parameter cache to reuse merged parameter output
 
-Core tasks:
+On each run, only changed or affected components are recomputed when possible.
 
-- detect `express()` apps and `express.Router()` instances
-- collect nested router aliases
-- follow `app.use()` and `router.use()` mount edges
-- resolve nested prefixes across router graphs
-- extract route handlers from `get`, `post`, `put`, `delete`, `patch`, `all`, and `route()` chains
-- collect middleware attached before the terminal handler
+## API Explorer Rendering Model
 
-This analyzer should produce normalized endpoint records that already include:
+The API Explorer tree is intentionally hierarchical and lazy:
 
-- `method`
-- `pathExpression`
-- `resolvedPath` when possible
-- `middleware[]`
-- handler source location
+- root: projects
+- project node: frameworks
+- framework node: endpoints or paged endpoint buckets for large sets
 
-### FastifyComponentAnalyzer
+When a framework has many endpoints, the UI renders page nodes such as Endpoints 1-200 before individual endpoint nodes. Page size is configurable through the setting nodeApiForge.apiExplorerFrameworkPageSize.
 
-Owns Fastify-specific component analysis.
+## How This Relates to the Code
 
-Core tasks:
+Current implementation entry points:
 
-- detect root Fastify instances and plugin instances
-- follow nested `register()` calls
-- propagate prefix state through plugin trees
-- extract routes from direct method calls and route config objects
-- read `preHandler` middleware and similar hooks
-- normalize object-style route definitions into the shared endpoint model
+- [Discovery engine](../src/discovery/discovery-engine.ts)
+- [Explorer tree provider](../src/discovery/api-explorer-tree-provider.ts)
+- [Express provider](../src/discovery/providers/express-discovery-provider.ts)
+- [Fastify provider](../src/discovery/providers/fastify-discovery-provider.ts)
+- [Nest provider](../src/discovery/providers/nest-discovery-provider.ts)
 
-### NestControllerAnalyzer
+## Extension Points
 
-Keeps NestJS as a separate decorator-based analyzer.
+The architecture is designed so future improvements can be added without changing extension command flow:
 
-Core tasks:
-
-- parse `@Controller()` prefixes
-- parse HTTP method decorators such as `@Get()`, `@Post()`, `@Patch()`, and `@Delete()`
-- collect class-level and method-level middleware decorators
-- merge controller prefix + method path into a shared route value
-
-### Shared Utilities
-
-The following utilities should stay framework-agnostic:
-
-- source file collection
-- AST helper functions
-- path joining
-- environment/local-constant resolution
-- placeholder normalization for export
-
-## How This Relates to the Current Code
-
-The current providers already contain the beginnings of this split:
-
-- [Express discovery provider](../src/discovery/providers/express-discovery-provider.ts)
-- [Fastify discovery provider](../src/discovery/providers/fastify-discovery-provider.ts)
-- [Nest discovery provider](../src/discovery/providers/nest-discovery-provider.ts)
-
-At the moment those providers combine detection and analysis in one place. The next refactor should move the graph traversal and path resolution logic into dedicated analyzer classes, leaving the providers responsible mainly for:
-
-- framework support checks
-- file enumeration
-- analyzer orchestration
-- warning aggregation
-
-## Recommended File Layout
-
-```
-src/discovery/
-├── analyzer/
-│   ├── analyzer-utils.ts
-│   ├── path-resolver.ts
-│   ├── express-component-analyzer.ts
-│   ├── fastify-component-analyzer.ts
-│   └── nest-controller-analyzer.ts
-├── providers/
-│   ├── express-discovery-provider.ts
-│   ├── fastify-discovery-provider.ts
-│   └── nest-discovery-provider.ts
-└── discovery-engine.ts
-```
-
-## Practical Rollout
-
-1. Extract shared AST and path utilities.
-2. Move Express router graph traversal into `ExpressComponentAnalyzer`.
-3. Move Fastify plugin tree traversal into `FastifyComponentAnalyzer`.
-4. Keep NestJS on its own decorator analyzer path.
-5. Add tests for nested routers, nested plugins, and placeholder resolution.
-
-## Expected Outcome
-
-This structure gives Node API Forge the same advantage AGL Essentials got from component analysis:
-
-- narrower responsibilities
-- easier test coverage
-- simpler framework-specific extension points
-- clearer route graph reasoning for nested Express and Fastify projects
+- deeper framework-specific analyzers where needed
+- richer parameter and schema inference
+- additional endpoint grouping or filtering strategies
+- extra diagnostics based on existing cache stats

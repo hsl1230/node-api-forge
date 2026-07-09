@@ -161,6 +161,61 @@ describe('ApiDiscoveryEngine custom seed loader', () => {
     expect(result.endpoints.some((e) => (e.resolvedPath ?? e.pathExpression) === '/seed-only')).toBe(true);
     expect(result.warnings.some((w) => w.code === 'seed-endpoint-unmatched')).toBe(true);
   });
+
+  it('extracts query params from deeper imported helper files', async () => {
+    const root = makeProject({ dependencies: { express: '^4.0.0' } });
+    fs.writeFileSync(
+      path.join(root, 'src', 'app.ts'),
+      [
+        "import { handle } from './handler';",
+        '',
+        'export function route(req, res) {',
+        '  return handle(req, res);',
+        '}'
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(root, 'src', 'handler.ts'),
+      [
+        "import { parse } from './query-utils';",
+        '',
+        'export function handle(req, res) {',
+        '  parse(req);',
+        "  return res.json({ ok: true });",
+        '}'
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(root, 'src', 'query-utils.ts'),
+      [
+        'export function parse(req) {',
+        '  const traceId = req.query.traceId;',
+        '  return traceId;',
+        '}'
+      ].join('\n')
+    );
+
+    const provider = new MockProvider({
+      endpoints: [{
+        method: 'GET',
+        framework: 'express',
+        pathExpression: '/status',
+        resolvedPath: '/status',
+        confidence: 'high',
+        handlerLocation: { filePath: path.join(root, 'src', 'app.ts'), line: 1 },
+        middleware: []
+      }],
+      warnings: [],
+      stats: { frameworksDetected: ['express'], providersRun: ['provider.mock'], endpointCount: 1, unresolvedEndpointCount: 0, scanDurationMs: 1 }
+    });
+
+    const engine = new ApiDiscoveryEngine([provider]);
+    const result = await engine.discover({ workspaceFolder: root });
+    const endpoint = result.endpoints.find((e) => (e.resolvedPath ?? e.pathExpression) === '/status');
+
+    expect(endpoint).toBeDefined();
+    expect(endpoint?.parameters?.some((item) => item.location === 'query' && item.name === 'traceId')).toBe(true);
+  });
 });
 
 class MockProvider implements ApiDiscoveryProvider {

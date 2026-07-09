@@ -11,6 +11,7 @@ import {
 } from './commands';
 import { ApiEndpoint, createDefaultDiscoveryEngine } from './discovery';
 import { ApiExplorerTreeProvider } from './discovery/api-explorer-tree-provider';
+import { formatEndpointDisplayLabel } from './discovery/endpoint-display';
 import { FrameworkDetector } from './discovery/framework-detector';
 import { resolveProjectName } from './discovery/project-name';
 import { collectSourceFiles } from './discovery/source-files';
@@ -120,14 +121,15 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     const resolvedPath = endpoint.resolvedPath ?? endpoint.pathExpression;
-    const endpointName = `${endpoint.method} ${resolvedPath}`;
+    const endpointName = formatEndpointDisplayLabel(endpoint);
     const projectName = getEndpointProjectName(endpoint);
+    const baseUrlVariableName = getProjectBaseUrlVariableName(projectName);
     const collectionName = projectName
-      ? `Node API Forge Discovery - ${projectName}`
+      ? projectName
       : 'Node API Forge Discovery';
-    const title = projectName
-      ? `Node API [${projectName}]: ${endpointName}`
-      : `Node API: ${endpointName}`;
+
+    const title = `Node API: ${endpointName}`;
+
     const query = (endpoint.parameters ?? [])
       .filter((parameter) => parameter.location === 'query')
       .map((parameter) => ({ key: parameter.name, value: '', enabled: true }));
@@ -149,7 +151,7 @@ export function activate(context: vscode.ExtensionContext): void {
         id: buildEndpointRequestId(endpoint),
         name: endpointName,
         method: endpoint.method,
-        url: `http://localhost:3000${resolvedPath.startsWith('/') ? resolvedPath : `/${resolvedPath}`}`,
+        url: `{{${baseUrlVariableName}}}${resolvedPath.startsWith('/') ? resolvedPath : `/${resolvedPath}`}`,
         headers,
         query,
         params,
@@ -237,6 +239,10 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onDidDelete((uri) => onFileEvent('delete', uri));
 
   const configWatcher = vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration('nodeApiForge.apiExplorerFrameworkPageSize')) {
+      explorerProvider.refreshTree();
+    }
+
     if (!event.affectsConfiguration('nodeApiForge') || !lastSelection || !isAutoRefreshEnabled()) {
       return;
     }
@@ -337,6 +343,9 @@ export function activate(context: vscode.ExtensionContext): void {
     output.appendLine(`Providers run: ${result.stats.providersRun.join(', ') || 'none'}`);
     output.appendLine(`Endpoints found: ${result.stats.endpointCount}`);
     output.appendLine(`Unresolved endpoints: ${result.stats.unresolvedEndpointCount}`);
+    output.appendLine(
+      `Parameter cache: reused ${result.stats.parameterCacheReusedEndpoints ?? 0}, recomputed ${result.stats.parameterCacheRecomputedEndpoints ?? 0}`
+    );
     output.appendLine(`Duration: ${result.stats.scanDurationMs}ms`);
 
     if (result.endpoints.length > 0) {
@@ -427,6 +436,34 @@ function isApiEndpoint(value: unknown): value is ApiEndpoint {
 function getEndpointProjectName(endpoint: ApiEndpoint): string | undefined {
   const projectRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
   return resolveProjectName(endpoint, projectRoots);
+}
+
+function getProjectBaseUrlVariableName(projectName?: string): string {
+  if (!projectName) {
+    return 'baseUrl';
+  }
+
+  const segments = projectName
+    .trim()
+    .split(/[^a-zA-Z0-9]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+
+  if (segments.length === 0) {
+    return 'baseUrl';
+  }
+
+  const [firstSegment, ...remainingSegments] = segments;
+  const normalized = [
+    firstSegment.toLowerCase(),
+    ...remainingSegments.map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1).toLowerCase())
+  ].join('');
+
+  const safeIdentifier = /^[0-9]/.test(normalized)
+    ? `project${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`
+    : normalized;
+
+  return `${safeIdentifier}BaseUrl`;
 }
 
 function normalizePath(filePath: string): string {
