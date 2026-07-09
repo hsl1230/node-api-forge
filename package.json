@@ -2,7 +2,7 @@
   "name": "node-api-forge",
   "displayName": "Node API Forge",
   "description": "Discover, test, and document Node APIs without Swagger—no app integration, full testing workflows, pure source-to-API in seconds.",
-  "version": "0.0.3",
+  "version": "0.0.5",
   "publisher": "henry-huang",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -54,6 +54,10 @@
     "color": "#1e1e2e",
     "theme": "dark"
   },
+  "extensionDependencies": [
+    "henry-huang.http-forge"
+  ],
+  "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [

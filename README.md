@@ -1,6 +1,12 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/hsl1230/node-api-forge/main/resources/icon.png" alt="Node API Forge" width="120"/>
+<p style="display: flex; align-items: center; justify-content: center; gap: 12px;">
+	<img src="https://raw.githubusercontent.com/hsl1230/node-api-forge/main/resources/icon.png" alt="Node API Forge" width="120"/>
+	<strong>works with</strong>
+	<a href="https://marketplace.visualstudio.com/items?itemName=henry-huang.http-forge">
+		<img src="https://raw.githubusercontent.com/hsl1230/http-forge/main/resources/http-forge-icon.png" alt="HTTP Forge" width="72"/>
+	</a>
+</p>
 
 # Node API Forge
 
@@ -15,7 +21,7 @@ No app integration. No production risk. No Swagger dependencies. Just source-to-
 
 </div>
 
-Node API Forge eliminates Swagger UI integration overhead by discovering endpoints directly from your Node.js source code and generating organized HTTP Forge workflows for testing, documentation, and automation—without adding app dependencies or production security risks.
+Node API Forge eliminates Swagger UI integration overhead by discovering endpoints directly from your Node.js source code and generating organized [HTTP Forge](https://marketplace.visualstudio.com/items?itemName=henry-huang.http-forge) workflows for testing, documentation, and automation—without adding app dependencies or production security risks.
 
 Supported frameworks: Express, NestJS, and Fastify.
 
