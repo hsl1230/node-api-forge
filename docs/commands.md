@@ -8,6 +8,10 @@ Node API Forge contributes the following commands:
 - `Node API Forge: Copy Endpoint Request`
 - `Node API Forge: Export Discovered Collection`
 - `Node API Forge: Show Endpoint Flow`
+- `Node API Forge: Search in Endpoint Files`
+- `Node API Forge: Go to Test File`
+- `Node API Forge: Export Project Collection`
+- `Node API Forge: Export Framework Collection`
 - `Node API Forge: Hard Refresh Workspace`
 
 ## Typical Workflow
@@ -22,21 +26,23 @@ Node API Forge contributes the following commands:
 - `Node API Forge: Discover APIs` performs a manual refresh and prints discovery diagnostics to the output channel.
 - If no custom seed loader is configured and discovery returns very few endpoints, the extension shows an in-product warning with quick actions to open:
 	- the custom seed loader guide
-	- the `nodeApiForge.customSeedLoaderModulePath` setting
+	- `.http-forge/node-api-forge.config.json`
 - This behavior is intended to guide projects that register routes through wrappers, manifests, or runtime composition patterns that static analysis cannot fully reconstruct.
 
-## Related Settings
+## Related Config Properties
 
-- `nodeApiForge.customSeedLoaderModulePath`
-- `nodeApiForge.contextProperties`
-- `nodeApiForge.frameworks`
-- `nodeApiForge.autoRefreshOnFileChanges`
+- `customSeedLoaderModulePath`
+- `contextProperties`
+- `frameworks`
+- `autoRefreshOnFileChanges`
+- `searchComponentLibAllowlist`
+- `externalCallLibraries`
 
 ## Performance Tuning
 
 If a framework node contains a very large number of endpoints, tune pagination with:
 
-- `nodeApiForge.apiExplorerFrameworkPageSize` (default: `200`, supported range: `25` to `1000`)
+- `apiExplorerFrameworkPageSize` in `.http-forge/node-api-forge.config.json` (default: `200`, supported range: `25` to `1000`)
 
 Guidance:
 

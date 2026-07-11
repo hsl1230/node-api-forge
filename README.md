@@ -42,7 +42,7 @@ Supported frameworks: Express, NestJS, Fastify, and AWS Lambda (raw handlers).
 | **Saved Inputs** | Not supported | Full—stored in collections, shareable via git |
 | **Request Organization** | By tag only | By project + framework, auto-grouped |
 | **Testing Workflows** | Basic | Full (pre/post scripts, assertions, CI) |
-| **Endpoint Flow** | Not available | 5-tab flow analyzer: diagram, middleware chain, component tree, data flow, docs |
+| **Endpoint Flow** | Not available | 6-tab flow analyzer: diagram, middleware chain, component tree, data flow, external calls, docs |
 | **Auto Refresh** | Not applicable | Incremental—only changed files re-analyzed on save |
 
 ## Why Teams Use It
@@ -50,7 +50,7 @@ Supported frameworks: Express, NestJS, Fastify, and AWS Lambda (raw handlers).
 - Discover Express, NestJS, Fastify, and AWS Lambda endpoints directly from source instead of manually curating requests.
 - Open endpoints in HTTP Forge with method, path, params, headers, and body context already mapped.
 - Browse APIs in a scalable explorer hierarchy (project -> framework -> endpoint), with automatic framework paging for very large endpoint sets.
-- Trace endpoint flow across 5 tabs: Mermaid flow diagram, ordered middleware chain, component tree, parameter data flow with click-to-source navigation, and a documentation/HTTP snippet view.
+- Trace endpoint flow across 6 tabs: Mermaid flow diagram, ordered middleware chain, component tree, parameter data flow, external call analysis, and a documentation/HTTP snippet view.
 - Export discovered endpoints as organized HTTP Forge collections grouped by project and framework.
 - Support multi-project workspaces and custom seed loaders for routes that cannot be auto-discovered from source.
 - Keep the explorer current with incremental auto-refresh—only changed files are re-analyzed on save.
@@ -65,38 +65,46 @@ Supported frameworks: Express, NestJS, Fastify, and AWS Lambda (raw handlers).
 | `Node API Forge: Copy Endpoint Request` | You need a quick portable request snippet | Copies an HTTP request template to clipboard |
 | `Node API Forge: Export Discovered Collection` | You want reusable request assets | Exports discovered endpoints as HTTP Forge collection JSON |
 | `Node API Forge: Show Endpoint Flow` | You want middleware/handler analysis | Opens flow analyzer webview for the endpoint |
+| `Node API Forge: Search in Endpoint Files` | You want route/component-focused workspace search | Opens Find in Files scoped to endpoint-related files |
+| `Node API Forge: Go to Test File` | You want to jump from handler to nearby tests | Opens a matching test file (`*.test.*`, `*.spec.*`, `__tests__`) when found |
+| `Node API Forge: Export Project Collection` | You want project-scoped artifacts | Exports one HTTP Forge collection for the selected project |
+| `Node API Forge: Export Framework Collection` | You want framework-scoped artifacts | Exports one HTTP Forge collection for a selected framework under a project |
 | `Node API Forge: Hard Refresh Workspace` | Discovery cache is stale after major changes | Clears caches and re-runs discovery |
 
 ## Example Setup
 
 ```jsonc
 {
-	"nodeApiForge.frameworks": ["auto"],
-	"nodeApiForge.customSeedLoaderModulePath": "./node-api-forge-generic-loader.js",
-	"nodeApiForge.contextProperties": ["locals"],
-	"nodeApiForge.autoRefreshOnFileChanges": true,
-	"nodeApiForge.searchComponentLibAllowlist": [],
-	"nodeApiForge.apiExplorerFrameworkPageSize": 200
+	"frameworks": ["auto"],
+	"customSeedLoaderModulePath": "./node-api-forge-generic-loader.js",
+	"contextProperties": ["locals"],
+	"autoRefreshOnFileChanges": true,
+	"searchComponentLibAllowlist": [],
+	"externalCallLibraries": [],
+	"apiExplorerFrameworkPageSize": 200
 }
 ```
 
+Save this file at `.http-forge/node-api-forge.config.json` in your workspace root.
+
 ## Configuration
 
-| Setting | Type | Default | Description |
+| Property | Type | Default | Description |
 |---|---|---|---|
-| `nodeApiForge.frameworks` | `string[]` | `["auto"]` | Framework hints for discovery in mixed projects (`auto`, `express`, `fastify`, `nestjs`, `lambda`). Lambda activates only when Express and Fastify are absent. |
-| `nodeApiForge.customSeedLoaderModulePath` | `string` | `""` | Optional JS module that exports `loadSeedManifestEndpoints(projectRoot, context)`. |
-| `nodeApiForge.contextProperties` | `string[]` | `["locals"]` | Shared context sub-properties to track on inferred request/response roots (for example `["locals", "context"]`). |
-| `nodeApiForge.autoRefreshOnFileChanges` | `boolean` | `true` | Automatically reruns discovery on relevant source/config changes. |
-| `nodeApiForge.searchComponentLibAllowlist` | `string[]` | `[]` | External/internal library packages Flow Search is allowed to traverse. |
-| `nodeApiForge.apiExplorerFrameworkPageSize` | `number` | `200` | Endpoints per framework page in API Explorer for large endpoint sets (range `25` to `1000`). |
+| `frameworks` | `string[]` | `["auto"]` | Framework hints for discovery in mixed projects (`auto`, `express`, `fastify`, `nestjs`, `lambda`). Lambda activates only when Express and Fastify are absent. |
+| `customSeedLoaderModulePath` | `string` | `""` | Optional JS module that exports `loadSeedManifestEndpoints(projectRoot, context)`. |
+| `contextProperties` | `string[]` | `["locals"]` | Shared context sub-properties to track on inferred request/response roots (for example `["locals", "context"]`). |
+| `autoRefreshOnFileChanges` | `boolean` | `true` | Automatically reruns discovery on relevant source/config changes. |
+| `searchComponentLibAllowlist` | `string[]` | `[]` | External/internal library packages Flow Search is allowed to traverse. |
+| `externalCallLibraries` | `object[]` | `[]` | Optional package-to-client mappings used by the Flow Analyzer External Calls tab for custom libraries. |
+| `apiExplorerFrameworkPageSize` | `number` | `200` | Endpoints per framework page in API Explorer for large endpoint sets (range `25` to `1000`). |
 
 ### Discovery Guidance
 
 When a manual discovery run finds very few endpoints (or none) and no custom seed loader is configured, Node API Forge shows a warning with actions to open:
 
 - custom seed loader docs
-- `nodeApiForge.customSeedLoaderModulePath` setting
+- `.http-forge/node-api-forge.config.json`
 
 This helps when routes are registered indirectly and cannot be fully inferred from static source patterns.
 

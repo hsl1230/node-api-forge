@@ -84,7 +84,7 @@ The analyzer uses AST-based root inference and call-site propagation to follow r
 - local helper calls
 - imported helper calls
 
-Context-style property tracking is configurable through `nodeApiForge.contextProperties` (default: `['locals']`).
+Context-style property tracking is configurable through `.http-forge/node-api-forge.config.json` using `contextProperties` (default: `['locals']`).
 This allows the same extraction pipeline to capture values from chains such as:
 
 - `response.locals.userId`
@@ -111,7 +111,7 @@ The API Explorer tree is intentionally hierarchical and lazy:
 - project node: frameworks
 - framework node: endpoints or paged endpoint buckets for large sets
 
-When a framework has many endpoints, the UI renders page nodes such as Endpoints 1-200 before individual endpoint nodes. Page size is configurable through the setting nodeApiForge.apiExplorerFrameworkPageSize.
+When a framework has many endpoints, the UI renders page nodes such as Endpoints 1-200 before individual endpoint nodes. Page size is configurable through `apiExplorerFrameworkPageSize` in `.http-forge/node-api-forge.config.json`.
 
 ## How This Relates to the Code
 

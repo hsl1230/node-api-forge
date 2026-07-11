@@ -2,18 +2,25 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {
-    COPY_ENDPOINT_REQUEST_COMMAND_ID,
-    DISCOVER_APIS_COMMAND_ID,
-    EXPORT_COMMAND_ID,
-    EXPORT_FRAMEWORK_COMMAND_ID,
-    EXPORT_PROJECT_COMMAND_ID,
-    GO_TO_TEST_FILE_COMMAND_ID,
-    HARD_REFRESH_WORKSPACE_COMMAND_ID,
-    OPEN_ENDPOINT_SOURCE_COMMAND_ID,
-    OPEN_HTTP_FORGE_COMMAND_ID,
-    SEARCH_IN_ENDPOINT_COMMAND_ID,
-    SHOW_FLOW_COMMAND_ID
+  COPY_ENDPOINT_REQUEST_COMMAND_ID,
+  DISCOVER_APIS_COMMAND_ID,
+  EXPORT_COMMAND_ID,
+  EXPORT_FRAMEWORK_COMMAND_ID,
+  EXPORT_PROJECT_COMMAND_ID,
+  GO_TO_TEST_FILE_COMMAND_ID,
+  HARD_REFRESH_WORKSPACE_COMMAND_ID,
+  OPEN_ENDPOINT_SOURCE_COMMAND_ID,
+  OPEN_HTTP_FORGE_COMMAND_ID,
+  SEARCH_IN_ENDPOINT_COMMAND_ID,
+  SHOW_FLOW_COMMAND_ID
 } from './commands';
+import {
+  getNodeApiForgeAutoRefreshOnFileChanges,
+  getNodeApiForgeContextProperties,
+  getNodeApiForgeCustomSeedLoaderModulePath,
+  getNodeApiForgeFrameworks,
+  resolveNodeApiForgeProjectConfigPaths
+} from './config/project-config';
 import { ApiEndpoint, ApiFramework, createDefaultDiscoveryEngine } from './discovery';
 import { ApiExplorerTreeProvider } from './discovery/api-explorer-tree-provider';
 import { formatEndpointDisplayLabel } from './discovery/endpoint-display';
@@ -21,12 +28,29 @@ import { FrameworkDetector } from './discovery/framework-detector';
 import { resolveProjectName } from './discovery/project-name';
 import { collectSourceFiles } from './discovery/source-files';
 import { serializeHttpForgeCollection, serializeScopedFrameworkCollection, serializeScopedProjectCollection } from './export/http-forge-collection';
+import { getExistingDoc } from './services/endpoint-doc-service';
 import { FlowDiagramPanel } from './webview/flow-diagram-panel';
 
 const HTTP_FORGE_EXTENSION_ID = 'henry-huang.http-forge';
 const FRAMEWORK_CACHE_PREFIX = 'frameworkCache:';
 const SUPPORTED_FRAMEWORKS = new Set(['express', 'fastify', 'nestjs', 'lambda'] as const);
 const FEW_ENDPOINTS_THRESHOLD = 2;
+
+interface HttpForgeCollectionItem {
+  type: 'request' | 'folder';
+  id?: string;
+  doc?: string;
+  summary?: string;
+  items?: HttpForgeCollectionItem[];
+  [key: string]: unknown;
+}
+
+interface HttpForgeCollection {
+  id: string;
+  name: string;
+  items: HttpForgeCollectionItem[];
+  [key: string]: unknown;
+}
 
 interface HttpForgeApi {
   openRequestContext(options: {
@@ -40,12 +64,17 @@ interface HttpForgeApi {
       params?: Record<string, string>;
       body?: unknown;
       description?: string;
+      doc?: string;
+      summary?: string;
     };
     readonly?: boolean;
     allowSave?: boolean;
     title?: string;
     collectionName?: string;
+    disableSchemas?: boolean;
   }): void;
+  getAllCollections?(): HttpForgeCollection[];
+  saveCollection?(collection: HttpForgeCollection): Promise<void>;
 }
 
 function normalizeContextProperties(values: string[] | undefined): string[] {
@@ -139,6 +168,16 @@ export function activate(context: vscode.ExtensionContext): void {
     const projectName = getEndpointProjectName(endpoint);
     const baseUrlVariableName = getProjectBaseUrlVariableName(projectName);
 
+    // Load any previously generated documentation to include in the request.
+    // Use package.json walk-up first (always finds the nearest sub-project like agl-recording-middleware/).
+    // Fall back to endpoint.projectRoot only when no package.json exists (rare).
+    const projectRoot = resolveProjectRootForEndpoint(endpoint)
+      ?? endpoint.projectRoot
+      ?? resolveProjectRootForFile(endpoint.handlerLocation.filePath, lastDiscoveryContext?.projectRoots ?? []);
+    const existingDoc = projectRoot
+      ? getExistingDoc(projectRoot, endpoint.method, resolvedPath)
+      : undefined;
+
     const gitBranch = await getGitBranch();
     const ticketMatch = gitBranch?.match(/([A-Z]+-\d+)/);
     const branchGroup = ticketMatch ? ` [${ticketMatch[1]}]` : '';
@@ -165,6 +204,7 @@ export function activate(context: vscode.ExtensionContext): void {
       readonly: true,
       allowSave: true,
       collectionName,
+      disableSchemas: true,
       request: {
         id: buildEndpointRequestId(endpoint),
         name: endpointName,
@@ -174,10 +214,14 @@ export function activate(context: vscode.ExtensionContext): void {
         query,
         params,
         body: endpoint.requestBody ? { type: 'raw', content: '' } : null,
-        description: `Discovered from ${endpoint.framework} source at ${endpoint.handlerLocation.filePath}:${endpoint.handlerLocation.line}`
+        description: `Discovered from ${endpoint.framework} source at ${endpoint.handlerLocation.filePath}:${endpoint.handlerLocation.line}`,
+        doc: existingDoc?.doc,
+        summary: existingDoc?.summary
       }
     });
   });
+
+  //Steven, identify, Edvin
 
   const showEndpointFlow = vscode.commands.registerCommand(SHOW_FLOW_COMMAND_ID, (arg?: unknown) => {
     const endpoint = resolveEndpointCommandArg(arg);
@@ -185,10 +229,13 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
+    // Enrich this endpoint with component analysis on-demand (deferred from bulk discovery).
+    discoveryEngine.enrichEndpoint(endpoint, lastDiscoveryContext?.contextProperties);
+
     FlowDiagramPanel.show(endpoint, context.extensionUri, async (currentEndpoint) => {
       const refreshedEndpoint = await hardRefreshEndpoint(currentEndpoint);
       return refreshedEndpoint ?? currentEndpoint;
-    });
+    }, lastDiscoveryContext?.projectRoots ?? []);
   });
 
   const hardRefreshWorkspace = vscode.commands.registerCommand(HARD_REFRESH_WORKSPACE_COMMAND_ID, async () => {
@@ -247,15 +294,40 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showWarningMessage('Node API Forge: No endpoint selected for search.');
       return;
     }
+    // Enrich this endpoint with component analysis on-demand.
+    discoveryEngine.enrichEndpoint(endpoint, lastDiscoveryContext?.contextProperties);
     FlowDiagramPanel.show(endpoint, context.extensionUri, async (currentEndpoint) => {
       const refreshedEndpoint = await hardRefreshEndpoint(currentEndpoint);
       return refreshedEndpoint ?? currentEndpoint;
-    });
+    }, lastDiscoveryContext?.projectRoots ?? []);
     // Give the panel a moment to open, then trigger search
     setTimeout(() => {
       vscode.commands.executeCommand('nodeApiForge.searchInEndpoint._internal', endpoint);
     }, 300);
   });
+
+  /**
+   * Called by FlowDiagramPanel after successfully generating a doc.
+   * Finds the matching request across all HTTP Forge collections and updates its `doc` field.
+   */
+  const syncDocToHttpForge = vscode.commands.registerCommand(
+    'nodeApiForge.syncDocToHttpForge',
+    async (endpoint: ApiEndpoint, doc: string, summary: string) => {
+      const httpForgeExtension = vscode.extensions.getExtension<HttpForgeApi>(HTTP_FORGE_EXTENSION_ID);
+      if (!httpForgeExtension) return;
+      const httpForgeApi = await httpForgeExtension.activate();
+      if (!httpForgeApi?.getAllCollections || !httpForgeApi?.saveCollection) return;
+
+      const requestId = buildEndpointRequestId(endpoint);
+      const collections = httpForgeApi.getAllCollections();
+      for (const collection of collections) {
+        if (updateDocInItems(collection.items, requestId, doc, summary)) {
+          await httpForgeApi.saveCollection(collection);
+          return;
+        }
+      }
+    }
+  );
 
   const exportProjectCollection = vscode.commands.registerCommand(EXPORT_PROJECT_COMMAND_ID, async (arg?: unknown) => {
     const result = explorerProvider.getLastResult();
@@ -366,17 +438,6 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onDidChange((uri) => onFileEvent('change', uri));
   watcher.onDidDelete((uri) => onFileEvent('delete', uri));
 
-  const configWatcher = vscode.workspace.onDidChangeConfiguration((event) => {
-    if (event.affectsConfiguration('nodeApiForge.apiExplorerFrameworkPageSize')) {
-      explorerProvider.refreshTree();
-    }
-
-    if (!event.affectsConfiguration('nodeApiForge') || !lastSelection || !isAutoRefreshEnabled()) {
-      return;
-    }
-    scheduleAutoRefresh('config-changed');
-  });
-
   context.subscriptions.push(
     discoverApis,
     openEndpointSource,
@@ -386,18 +447,18 @@ export function activate(context: vscode.ExtensionContext): void {
     hardRefreshWorkspace,
     exportDiscoveredCollection,
     searchInEndpoint,
+    syncDocToHttpForge,
     exportProjectCollection,
     exportFrameworkCollection,
     goToTestFile,
     watcher,
-    configWatcher,
     output,
     vscode.window.registerTreeDataProvider('nodeApiForge.apiExplorer', explorerProvider)
   );
 
   function isAutoRefreshEnabled(): boolean {
-    const configuration = vscode.workspace.getConfiguration('nodeApiForge');
-    return configuration.get<boolean>('autoRefreshOnFileChanges', true);
+    const workspaceRoot = lastSelection?.workspaceFolder ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return getNodeApiForgeAutoRefreshOnFileChanges(workspaceRoot);
   }
 
   function scheduleAutoRefresh(reason: string): void {
@@ -433,11 +494,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function runDiscovery(selection: DiscoverySelection, manual: boolean, reason: string): Promise<void> {
     const { workspaceFolder, includeProjectRoots } = selection;
-    const configuration = vscode.workspace.getConfiguration('nodeApiForge');
-    const customSeedLoaderModulePath = configuration.get<string>('customSeedLoaderModulePath');
-    const contextProperties = normalizeContextProperties(configuration.get<string[]>('contextProperties'));
+    const customSeedLoaderModulePath = getNodeApiForgeCustomSeedLoaderModulePath(workspaceFolder);
+    const contextProperties = normalizeContextProperties(getNodeApiForgeContextProperties(workspaceFolder));
     console.log('[extension] Configuration read - customSeedLoaderModulePath:', customSeedLoaderModulePath);
-    const configuredFrameworks = configuration.get<string[]>('frameworks') ?? ['auto'];
+    const configuredFrameworks = getNodeApiForgeFrameworks(workspaceFolder);
     const projectRoots = includeProjectRoots?.length ? includeProjectRoots : [workspaceFolder];
     const frameworksByProjectRoot = await resolveFrameworksByProjectRoot(
       projectRoots,
@@ -451,7 +511,8 @@ export function activate(context: vscode.ExtensionContext): void {
       includeProjectRoots,
       frameworksByProjectRoot,
       customSeedLoaderModulePath,
-      contextProperties
+      contextProperties,
+      skipComponentAnalysis: true
     };
 
     console.log('[extension] refreshContext:', JSON.stringify(refreshContext, null, 2).substring(0, 300));
@@ -470,7 +531,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
 
-    trackedFiles = buildTrackedFiles(result, projectRoots, customSeedLoaderModulePath);
+    trackedFiles = buildTrackedFiles(result, workspaceFolder, projectRoots, customSeedLoaderModulePath);
     lastSelection = selection;
     lastDiscoveryContext = { projectRoots, customSeedLoaderModulePath, contextProperties };
 
@@ -510,14 +571,14 @@ export function activate(context: vscode.ExtensionContext): void {
             ? 'Node API Forge: No endpoints were discovered. This usually means some routes are registered outside the source patterns Node API Forge can infer. Configure a custom seed loader to supply those endpoints. See the Custom Seed Loader document for setup.'
             : `Node API Forge: Only ${result.stats.endpointCount} endpoint(s) were discovered. Some routes may be registered indirectly or outside the source patterns Node API Forge can infer. Configure a custom seed loader to supplement discovery. See the Custom Seed Loader document for setup.`,
           'Open Docs',
-          'Open Setting'
+          'Open Config'
         );
 
         if (action === 'Open Docs') {
           const document = await vscode.workspace.openTextDocument(docsUri);
           await vscode.window.showTextDocument(document, { preview: false });
-        } else if (action === 'Open Setting') {
-          await vscode.commands.executeCommand('workbench.action.openSettings', 'nodeApiForge.customSeedLoaderModulePath');
+        } else if (action === 'Open Config') {
+          await openNodeApiForgeProjectConfig(workspaceFolder);
         }
       }
     }
@@ -544,7 +605,12 @@ export function activate(context: vscode.ExtensionContext): void {
       return undefined;
     }
 
-    return matchEndpoint(latestResult.endpoints, endpoint);
+    const matched = matchEndpoint(latestResult.endpoints, endpoint);
+    if (matched) {
+      // Run component analysis for this specific endpoint (skipped during bulk refresh).
+      discoveryEngine.enrichEndpoint(matched, lastDiscoveryContext?.contextProperties);
+    }
+    return matched;
   }
 }
 
@@ -552,6 +618,42 @@ function buildEndpointRequestId(endpoint: ApiEndpoint): string {
   const projectName = getEndpointProjectName(endpoint) ?? 'unmapped-project';
   const key = `${projectName}:${endpoint.framework}:${endpoint.method}:${endpoint.resolvedPath ?? endpoint.pathExpression}`;
   return `node-api-${key.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase()}`;
+}
+
+/** Walk up from the handler file to find the nearest package.json directory. */
+function resolveProjectRootForEndpoint(endpoint: ApiEndpoint): string | undefined {
+  let dir = path.dirname(endpoint.handlerLocation.filePath);
+  for (let i = 0; i < 10; i++) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const uri = vscode.Uri.file(endpoint.handlerLocation.filePath);
+  return vscode.workspace.getWorkspaceFolder(uri)?.uri.fsPath;
+}
+
+/**
+ * Recursively find a request by ID in an HTTP Forge collection item tree and
+ * update its `doc` and `summary` fields in-place. Returns true if found.
+ */
+function updateDocInItems(
+  items: HttpForgeCollectionItem[],
+  requestId: string,
+  doc: string,
+  summary: string
+): boolean {
+  for (const item of items) {
+    if (item.type === 'request' && item.id === requestId) {
+      item.doc = doc;
+      item.summary = summary;
+      return true;
+    }
+    if (item.type === 'folder' && Array.isArray(item.items)) {
+      if (updateDocInItems(item.items, requestId, doc, summary)) return true;
+    }
+  }
+  return false;
 }
 
 function resolveEndpointCommandArg(arg: unknown): ApiEndpoint | undefined {
@@ -625,10 +727,15 @@ function normalizePath(filePath: string): string {
 
 function buildTrackedFiles(
   result: { endpoints: Array<{ handlerLocation: { filePath: string } }>; warnings: Array<{ filePath?: string }> },
+  workspaceFolder: string,
   projectRoots: string[],
   customSeedLoaderModulePath?: string
 ): Set<string> {
   const tracked = new Set<string>();
+
+  for (const configPath of resolveNodeApiForgeProjectConfigPaths(workspaceFolder)) {
+    tracked.add(normalizePath(configPath));
+  }
 
   for (const endpoint of result.endpoints) {
     tracked.add(normalizePath(endpoint.handlerLocation.filePath));
@@ -719,6 +826,27 @@ async function clearFrameworkCache(workspaceState: vscode.Memento, projectRoots:
   for (const projectRoot of projectRoots) {
     await workspaceState.update(`${FRAMEWORK_CACHE_PREFIX}${projectRoot}`, undefined);
   }
+}
+
+async function openNodeApiForgeProjectConfig(workspaceRoot: string): Promise<void> {
+  const configPath = resolveNodeApiForgeProjectConfigPaths(workspaceRoot)[0];
+  await fs.promises.mkdir(path.dirname(configPath), { recursive: true });
+
+  if (!fs.existsSync(configPath)) {
+    const initialConfig = {
+      frameworks: ['auto'],
+      contextProperties: ['locals'],
+      customSeedLoaderModulePath: '',
+      autoRefreshOnFileChanges: true,
+      externalCallLibraries: [],
+      searchComponentLibAllowlist: [],
+      apiExplorerFrameworkPageSize: 200
+    };
+    await fs.promises.writeFile(configPath, `${JSON.stringify(initialConfig, null, 2)}\n`, 'utf-8');
+  }
+
+  const document = await vscode.workspace.openTextDocument(configPath);
+  await vscode.window.showTextDocument(document, { preview: false });
 }
 
 function resolveProjectRootForFile(filePath: string, projectRoots: string[]): string | undefined {

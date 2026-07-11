@@ -1,9 +1,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import {
+  getNodeApiForgeExternalCallLibraries,
+  getNodeApiForgeSearchComponentLibAllowlist,
+  resolveNodeApiForgeWorkspaceRoot
+} from '../config/project-config';
+import { detectExternalCalls, ExternalCall, ExternalCallLibraryConfig } from '../discovery/analyzer/external-call-analyzer';
 import { formatEndpointDisplayLabel } from '../discovery/endpoint-display';
-import { detectExternalCalls, ExternalCall } from '../discovery/analyzer/external-call-analyzer';
 import { ApiEndpoint, SourceLocation } from '../discovery/types';
+import {
+  generateEndpointDoc,
+  getDocFilePath,
+  getExistingDoc
+} from '../services/endpoint-doc-service';
 
 interface PathAliasEntry {
   key: string;
@@ -44,17 +54,20 @@ export class FlowDiagramPanel {
   private endpoint: ApiEndpoint;
   private disposables: vscode.Disposable[] = [];
   private docsAbortController?: vscode.CancellationTokenSource;
+  private projectRoots: string[];
 
   private constructor(
     panel: vscode.WebviewPanel,
     endpoint: ApiEndpoint,
     resourceRoot: vscode.Uri,
-    onHardRefresh?: (endpoint: ApiEndpoint) => Promise<ApiEndpoint | undefined>
+    onHardRefresh?: (endpoint: ApiEndpoint) => Promise<ApiEndpoint | undefined>,
+    projectRoots: string[] = []
   ) {
     this.panel = panel;
     this.endpoint = endpoint;
     this.resourceRoot = resourceRoot;
     this.onHardRefresh = onHardRefresh;
+    this.projectRoots = projectRoots;
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.webview.onDidReceiveMessage(
       async (msg: { command: string; filePath?: string; line?: number; content?: string; format?: string }) => {
@@ -78,8 +91,18 @@ export class FlowDiagramPanel {
           return;
         }
 
-        if (msg.command === 'generateDocs') {
-          await this.handleGenerateDocs();
+        if (msg.command === 'generateDoc') {
+          await this.handleGenerateDoc();
+          return;
+        }
+
+        if (msg.command === 'openDocFile') {
+          await this.handleOpenDocFile();
+          return;
+        }
+
+        if (msg.command === 'getDocStatus') {
+          this.handleGetDocStatus();
           return;
         }
 
@@ -100,7 +123,8 @@ export class FlowDiagramPanel {
   public static show(
     endpoint: ApiEndpoint,
     extensionUri: vscode.Uri,
-    onHardRefresh?: (endpoint: ApiEndpoint) => Promise<ApiEndpoint | undefined>
+    onHardRefresh?: (endpoint: ApiEndpoint) => Promise<ApiEndpoint | undefined>,
+    projectRoots: string[] = []
   ): FlowDiagramPanel {
     const title = `Flow: ${formatEndpointDisplayLabel(endpoint)}`;
     const resourceRoot = vscode.Uri.joinPath(extensionUri, 'resources', 'features', 'flow-analyzer');
@@ -114,7 +138,7 @@ export class FlowDiagramPanel {
         localResourceRoots: [resourceRoot]
       }
     );
-    const instance = new FlowDiagramPanel(panel, endpoint, resourceRoot, onHardRefresh);
+    const instance = new FlowDiagramPanel(panel, endpoint, resourceRoot, onHardRefresh, projectRoots);
     instance.render();
     return instance;
   }
@@ -166,54 +190,147 @@ export class FlowDiagramPanel {
     await vscode.commands.executeCommand('nodeApiForge.openEndpointInHttpForge', this.endpoint);
   }
 
-  private async handleGenerateDocs(): Promise<void> {
+  /** Return the project root that should be used for doc storage. */
+  private resolveProjectRootForDocs(): string | undefined {
+    const handlerPath = this.endpoint.handlerLocation.filePath;
+
+    // First priority: walk up from the handler file to find the nearest package.json.
+    // This always finds the correct sub-project boundary (e.g. agl-recording-middleware/).
+    let dir = path.dirname(handlerPath);
+    for (let i = 0; i < 10; i++) {
+      if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+
+    // Second priority: use the projectRoot stamped by the discovery engine.
+    // Useful when no package.json exists but includeProjectRoots is explicitly configured.
+    if (this.endpoint.projectRoot) return this.endpoint.projectRoot;
+
+    // Third priority: match against the discovery-context project roots.
+    if (this.projectRoots.length > 0) {
+      let bestMatch: string | undefined;
+      const normalizedHandler = handlerPath.replace(/\\/g, '/');
+      for (const root of this.projectRoots) {
+        const normalizedRoot = root.replace(/\\/g, '/');
+        if (normalizedHandler === normalizedRoot || normalizedHandler.startsWith(`${normalizedRoot}/`)) {
+          if (!bestMatch || normalizedRoot.length > bestMatch.length) {
+            bestMatch = root;
+          }
+        }
+      }
+      if (bestMatch) return bestMatch;
+    }
+
+    // Last resort: VS Code workspace folder
+    const handlerUri = vscode.Uri.file(handlerPath);
+    return vscode.workspace.getWorkspaceFolder(handlerUri)?.uri.fsPath;
+  }
+
+  private handleGetDocStatus(): void {
+    const projectRoot = this.resolveProjectRootForDocs();
+    const ep = this.endpoint;
+    const route = ep.resolvedPath ?? ep.pathExpression;
+    const existing = projectRoot ? getExistingDoc(projectRoot, ep.method, route) : undefined;
+
+    this.panel.webview.postMessage({
+      command: 'docStatus',
+      content: {
+        exists: !!existing,
+        summary: existing?.summary,
+        doc: existing?.doc,
+        hasCopilot: true, // checked lazily during generation
+      },
+    });
+  }
+
+  private async handleGenerateDoc(): Promise<void> {
     this.docsAbortController?.cancel();
     this.docsAbortController = new vscode.CancellationTokenSource();
-    const token = this.docsAbortController.token;
+
+    const projectRoot = this.resolveProjectRootForDocs();
+    if (!projectRoot) {
+      await this.panel.webview.postMessage({
+        command: 'docResult',
+        content: { exists: false, error: 'Could not determine project root for doc storage.' },
+      });
+      return;
+    }
+
+    await this.panel.webview.postMessage({ command: 'docGenerating' });
+
+    const report = (step: string, detail?: string) => {
+      this.panel.webview.postMessage({
+        command: 'docProgress',
+        content: { step, detail: detail ?? '', timestamp: Date.now() },
+      });
+    };
+
+    // Collect component files for this endpoint
+    const componentFiles = this.collectAllComponentFiles();
 
     try {
-      const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-      if (models.length === 0) {
-        await this.panel.webview.postMessage({ command: 'docsError', message: 'GitHub Copilot language model not available.' });
-        return;
-      }
-
       const ep = this.endpoint;
-      const route = ep.resolvedPath ?? ep.pathExpression;
-      const params = (ep.parameters ?? []).map((p) => `  - ${p.name} (${p.location}${p.required ? ', required' : ''}): ${p.type ?? 'unknown'}`).join('\n');
-      const middleware = (ep.middleware ?? []).map((m) => `  - ${m.name}`).join('\n');
-
-      const prompt = [
-        `Generate concise API endpoint documentation in Markdown for the following endpoint:`,
-        ``,
-        `**Method:** ${ep.method}`,
-        `**Path:** ${route}`,
-        `**Framework:** ${ep.framework}`,
-        `**Handler:** ${ep.handlerLocation.filePath}:${ep.handlerLocation.line}`,
-        params ? `**Parameters:**\n${params}` : `**Parameters:** none`,
-        middleware ? `**Middleware:**\n${middleware}` : `**Middleware:** none`,
-        ``,
-        `Include: a one-paragraph description of the endpoint's likely purpose, a summary table of parameters with Name/In/Type/Required/Description columns, and any notes about the middleware chain.`,
-        `Keep the response under 400 words. Use Markdown formatting.`
-      ].join('\n');
-
-      await this.panel.webview.postMessage({ command: 'docsStart' });
-
-      const messages = [vscode.LanguageModelChatMessage.User(prompt)];
-      const response = await models[0].sendRequest(messages, {}, token);
-
-      let fullText = '';
-      for await (const fragment of response.text) {
-        if (token.isCancellationRequested) break;
-        fullText += fragment;
-        await this.panel.webview.postMessage({ command: 'docsChunk', text: fragment });
+      const result = await generateEndpointDoc(ep, componentFiles, projectRoot, report);
+      if (result) {
+        await this.panel.webview.postMessage({
+          command: 'docResult',
+          content: { exists: true, summary: result.summary, doc: result.doc },
+        });
+        // Sync the generated doc to any matching HTTP Forge collection request.
+        try {
+          await vscode.commands.executeCommand(
+            'nodeApiForge.syncDocToHttpForge',
+            ep,
+            result.doc,
+            result.summary
+          );
+          report('  ✓ Synced to HTTP Forge collection');
+        } catch {
+          // HTTP Forge may not be installed — ignore silently
+        }
+      } else {
+        await this.panel.webview.postMessage({
+          command: 'docResult',
+          content: { exists: false, error: 'Doc generation returned no result. Check progress log for details.' },
+        });
       }
-
-      await this.panel.webview.postMessage({ command: 'docsDone', text: fullText });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.panel.webview.postMessage({ command: 'docsError', message });
+      await this.panel.webview.postMessage({
+        command: 'docResult',
+        content: { exists: false, error: message },
+      });
     }
+  }
+
+  private async handleOpenDocFile(): Promise<void> {
+    const projectRoot = this.resolveProjectRootForDocs();
+    if (!projectRoot) return;
+    const ep = this.endpoint;
+    const route = ep.resolvedPath ?? ep.pathExpression;
+    const filePath = getDocFilePath(projectRoot, ep.method, route);
+    if (!fs.existsSync(filePath)) {
+      vscode.window.showWarningMessage('Documentation file not found. Generate it first.');
+      return;
+    }
+    const uri = vscode.Uri.file(filePath);
+    await vscode.window.showTextDocument(uri);
+  }
+
+  /** Collect all unique source files in the endpoint's component tree. */
+  private collectAllComponentFiles(): string[] {
+    const ep = this.endpoint;
+    const seen = new Set<string>();
+    const add = (fp: string | undefined) => { if (fp) seen.add(fp); };
+    add(ep.handlerLocation.filePath);
+    (ep.middleware ?? []).forEach(m => add(m.location?.filePath));
+    const rootFiles = collectComponentRootFiles(ep);
+    const allowlistedLibraries = getSearchAllowlistedLibraries();
+    const traversal = collectComponentTraversal(rootFiles, allowlistedLibraries);
+    traversal.files.forEach(f => add(f));
+    return [...seen];
   }
 
   private async handleExportDiagram(content: string, format: 'svg' | 'png'): Promise<void> {
@@ -305,45 +422,28 @@ function collectRelatedComponentFiles(endpoint: ApiEndpoint): string[] {
 }
 
 function collectComponentRootFiles(endpoint: ApiEndpoint): string[] {
-  const rootFiles = new Set<string>();
-  rootFiles.add(normalizePath(endpoint.handlerLocation.filePath));
+  // Roots are middleware (in registration order) then handler — matching the
+  // Middleware Chain tab.  Detection files (parameters, cookies, headers, body)
+  // are NOT roots; they appear as tree nodes when reachable via the traversal.
+  const seen = new Set<string>();
+  const rootFiles: string[] = [];
 
   for (const middleware of endpoint.middleware ?? []) {
     if (middleware.location?.filePath) {
-      rootFiles.add(normalizePath(middleware.location.filePath));
-    }
-  }
-
-  for (const parameter of endpoint.parameters ?? []) {
-    if (parameter.detectionLocation?.filePath) {
-      rootFiles.add(normalizePath(parameter.detectionLocation.filePath));
-    }
-    for (const evidence of parameter.evidenceLocations ?? []) {
-      if (evidence.filePath) {
-        rootFiles.add(normalizePath(evidence.filePath));
+      const normalized = normalizePath(middleware.location.filePath);
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        rootFiles.push(normalized);
       }
     }
   }
 
-  if (endpoint.requestBody?.detectionLocation?.filePath) {
-    rootFiles.add(normalizePath(endpoint.requestBody.detectionLocation.filePath));
+  const handlerPath = normalizePath(endpoint.handlerLocation.filePath);
+  if (!seen.has(handlerPath)) {
+    rootFiles.push(handlerPath);
   }
 
-  for (const cookie of endpoint.cookies ?? []) {
-    if (cookie.detectionLocation?.filePath) {
-      rootFiles.add(normalizePath(cookie.detectionLocation.filePath));
-    }
-  }
-
-  for (const response of endpoint.responses ?? []) {
-    for (const header of response.headers ?? []) {
-      if (header.detectionLocation?.filePath) {
-        rootFiles.add(normalizePath(header.detectionLocation.filePath));
-      }
-    }
-  }
-
-  return Array.from(rootFiles);
+  return rootFiles;
 }
 
 function buildComponentGraph(endpoint: ApiEndpoint): ComponentGraphPayload {
@@ -486,10 +586,47 @@ function addSourceLine(lineByFile: Record<string, number>, filePath: string, lin
 }
 
 function getSearchAllowlistedLibraries(): string[] {
-  const configured = vscode.workspace.getConfiguration('nodeApiForge').get<string[]>('searchComponentLibAllowlist') ?? [];
+  const workspaceRoot = resolveNodeApiForgeWorkspaceRoot();
+  const configured = getNodeApiForgeSearchComponentLibAllowlist(workspaceRoot);
   return configured
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+/**
+ * Resolve each allowlisted library package name to its root directory on disk.
+ * Handles both node_modules installs and local `file:` dependencies cloned
+ * into the workspace.  Returns normalised absolute paths (forward slashes).
+ */
+function resolveLibraryRoots(packages: string[], contextFiles: string[]): string[] {
+  // Use the first available context file to anchor require.resolve
+  const contextDir = contextFiles.length > 0
+    ? path.dirname(contextFiles[0])
+    : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+
+  const roots: string[] = [];
+  for (const pkg of packages) {
+    try {
+      // Resolve <pkg>/package.json → its directory is the package root
+      const pkgJson = require.resolve(`${pkg}/package.json`, { paths: [contextDir] });
+      roots.push(normalizePath(path.dirname(pkgJson)));
+    } catch {
+      // Some packages don't expose package.json — try resolving the main entry
+      try {
+        const main = require.resolve(pkg, { paths: [contextDir] });
+        // Walk up until we find the package root (directory containing package.json)
+        let dir = path.dirname(main);
+        while (dir !== path.dirname(dir)) {
+          if (fs.existsSync(path.join(dir, 'package.json'))) {
+            roots.push(normalizePath(dir));
+            break;
+          }
+          dir = path.dirname(dir);
+        }
+      } catch { /* skip unresolvable packages */ }
+    }
+  }
+  return [...new Set(roots)];
 }
 
 function collectComponentTreeFiles(rootFiles: string[], allowlistedLibraries: string[]): string[] {
@@ -890,8 +1027,13 @@ function buildWebviewHtml(endpoint: ApiEndpoint, webview: vscode.Webview, resour
     ...componentGraph.rootFiles,
     ...Object.keys(componentGraph.childrenByFile)
   ];
-  const externalCalls: ExternalCall[] = detectExternalCalls([...new Set(allFiles)]);
-  const initialData = `<script>window.DIAGRAM_SRC = ${JSON.stringify(diagram)};window.ENDPOINT = ${JSON.stringify(endpoint)};window.COMPONENT_GRAPH = ${JSON.stringify(componentGraph)};window.EXTERNAL_CALLS = ${JSON.stringify(externalCalls)};</script>`;
+  const workspaceRoot = resolveNodeApiForgeWorkspaceRoot(endpoint.handlerLocation.filePath);
+  const userLibraries: ExternalCallLibraryConfig[] = getNodeApiForgeExternalCallLibraries(workspaceRoot);
+  const externalCalls: ExternalCall[] = detectExternalCalls([...new Set(allFiles)], userLibraries);
+
+  const allowlistedLibraries = getSearchAllowlistedLibraries();
+  const libRoots = resolveLibraryRoots(allowlistedLibraries, allFiles);
+  const initialData = `<script>window.DIAGRAM_SRC = ${JSON.stringify(diagram)};window.ENDPOINT = ${JSON.stringify(endpoint)};window.COMPONENT_GRAPH = ${JSON.stringify(componentGraph)};window.EXTERNAL_CALLS = ${JSON.stringify(externalCalls)};window.SYS_MW_LIB_ROOTS = ${JSON.stringify(libRoots)};</script>`;
 
   html = html.replace(/\{\{cspSource\}\}/g, webview.cspSource);
   html = html.replace('{{styleUri}}',    styleUri.toString());

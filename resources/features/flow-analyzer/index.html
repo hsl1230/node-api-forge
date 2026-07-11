@@ -55,7 +55,7 @@
           <span class="legend-item"><span class="legend-dot" style="background:#1e3a5f;border:1px solid #2b6cb0"></span>Request</span>
           <span class="legend-item"><span class="legend-dot" style="background:#2d3748;border:1px solid #4a5568"></span>Middleware</span>
           <span class="legend-item"><span class="legend-dot" style="background:#1a3a2a;border:1px solid #276749"></span>Handler</span>
-          <span style="color:var(--text-muted);font-size:11px;margin-left:8px">— Click left edge (▶/▼) to expand/collapse, click node body for details</span>
+          <span style="color:var(--text-muted);font-size:11px;margin-left:8px">— Click any node for details · Double-click ▶/▼ to expand/collapse + details</span>
         </div>
       </div>
       <div class="diagram-container" id="mermaid-diagram">
@@ -78,6 +78,7 @@
     <div id="component-tree" class="tab-panel">
       <div class="component-tree-header">
         <h3>Component Hierarchy</h3>
+        <span style="color:var(--text-muted);font-size:11px;margin-left:4px">— Click for details · Click ▶ or double-click to expand/collapse</span>
         <div class="tree-controls">
           <button id="expand-all-btn">Expand All</button>
           <button id="collapse-all-btn">Collapse All</button>
@@ -108,12 +109,19 @@
     <div id="doc-view" class="tab-panel">
       <div class="doc-view-header">
         <h3>Endpoint Documentation</h3>
-        <div style="display:flex;gap:8px;margin-left:auto">
-          <button id="generate-docs-btn" class="header-btn">✨ Generate with AI</button>
+        <div class="doc-actions">
+          <button id="generate-doc-btn" class="header-btn primary" title="Generate or regenerate documentation using Copilot">✨ Generate</button>
+          <button id="open-doc-file-btn" class="header-btn" title="Open the .md file in editor" style="display:none;">📂 Open File</button>
         </div>
       </div>
-      <div id="doc-content" class="doc-content"></div>
-      <div id="doc-ai-content" class="doc-content" style="display:none"></div>
+      <div id="doc-status" class="doc-status">
+        <div class="doc-empty-state">
+          <p>No documentation generated yet for this endpoint.</p>
+          <p class="doc-hint">Click <strong>✨ Generate</strong> to create documentation using Copilot.</p>
+        </div>
+      </div>
+      <div id="doc-summary" class="doc-summary" style="display:none;"></div>
+      <div id="doc-content" class="doc-content" style="display:none;"></div>
     </div>
 
   </div><!-- /tab-content -->

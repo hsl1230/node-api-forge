@@ -1,6 +1,6 @@
 # Custom Seed Loader
 
-Node API Forge can load seed endpoints through a custom module configured by `nodeApiForge.customSeedLoaderModulePath`.
+Node API Forge can load seed endpoints through a custom module configured in `.http-forge/node-api-forge.config.json` via `customSeedLoaderModulePath`.
 
 Use a custom seed loader when endpoint discovery from source is incomplete, for example when:
 
@@ -13,26 +13,26 @@ The custom seed loader does not replace normal source discovery. Its output is m
 
 ## How It Is Resolved
 
-`nodeApiForge.customSeedLoaderModulePath` can be either:
+`customSeedLoaderModulePath` can be either:
 
 - an absolute path
-- or a path relative to each discovered project root
+- or a path relative to the workspace root (from `.http-forge/node-api-forge.config.json`)
 
 If you set:
 
 ```json
 {
-  "nodeApiForge.customSeedLoaderModulePath": "seed-loader.js"
+  "customSeedLoaderModulePath": "seed-loader.js"
 }
 ```
 
-and your workspace project root is `/workspace/service-a`, Node API Forge looks for:
+and your workspace root is `/workspace`, Node API Forge resolves this to:
 
 ```text
-/workspace/service-a/seed-loader.js
+/workspace/seed-loader.js
 ```
 
-In a multi-project workspace, the same configured path is resolved separately for each project root.
+In a multi-project workspace, this still works as a shared loader because the same resolved module is called for each discovered `projectRoot`.
 
 ## Export Contract
 
@@ -155,7 +155,7 @@ The seed loader can return the same `ApiEndpoint` shape used internally by Node 
 
 HTTP method for the endpoint, for example `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`.
 
-#### `framework: 'express' | 'fastify' | 'nestjs' | 'unknown'`
+#### `framework: 'express' | 'fastify' | 'nestjs' | 'lambda' | 'unknown'`
 
 Framework associated with the endpoint.
 
@@ -316,23 +316,23 @@ Use:
 - `medium` when the route is known but derived from partial config or convention
 - `low` when the endpoint is approximate and may need user review
 
-## Settings Example
+## Config Example
 
-Set the loader in VS Code settings:
+Set the loader in `.http-forge/node-api-forge.config.json`:
 
 ```json
 {
-  "nodeApiForge.customSeedLoaderModulePath": "seed-loader.js"
+  "customSeedLoaderModulePath": "seed-loader.js"
 }
 ```
 
-Example with other related settings:
+Example with other related config properties:
 
 ```json
 {
-  "nodeApiForge.frameworks": ["auto"],
-  "nodeApiForge.customSeedLoaderModulePath": "seed-loader.js",
-  "nodeApiForge.contextProperties": ["locals"]
+  "frameworks": ["auto"],
+  "customSeedLoaderModulePath": "seed-loader.js",
+  "contextProperties": ["locals"]
 }
 ```
 

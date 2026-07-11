@@ -50,7 +50,7 @@ export class NestDiscoveryProvider implements ApiDiscoveryProvider {
     const startedAt = Date.now();
     const warnings: DiscoveryResult['warnings'] = [];
     const endpoints: ApiEndpoint[] = [];
-    const files = collectSourceFiles(_fingerprint.projectRoot);
+    const files = _fingerprint.sourceFiles ?? collectSourceFiles(_fingerprint.projectRoot);
 
     this.pruneDeletedFiles(_fingerprint.projectRoot, files);
 

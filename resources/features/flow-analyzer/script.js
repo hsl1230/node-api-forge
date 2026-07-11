@@ -21,12 +21,16 @@ const state = {
   sidebar: {
     history: [],
     current: null
-  }
+  },
+  lastDiagramClick: { nodeId: null, time: 0 }
 };
 
 mermaid.initialize({
   startOnLoad: false,
   theme: 'dark',
+  // 'loose' enables the `click nodeId callbackFn` directive so Mermaid wires up
+  // click listeners itself after bindFunctions() is called — no DOM id decoding needed.
+  securityLevel: 'loose',
   flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis', nodeSpacing: 50, rankSpacing: 60 }
 });
 
@@ -45,11 +49,13 @@ document.addEventListener('DOMContentLoaded', () => {
   setupSidebar();
   setupDiagramExport();
   setupSystemMiddlewareToggle();
-  setupDocGeneration();
+  setupDocButtons();
   document.getElementById('search-btn')?.addEventListener('click', onSearchClick);
   document.getElementById('test-btn')?.addEventListener('click', onTestClick);
   document.getElementById('refresh-btn')?.addEventListener('click', onHardRefreshClick);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSidebar(); });
+  // Request current doc status from extension host
+  vscode.postMessage({ command: 'getDocStatus' });
 });
 
 function onSearchClick() {
@@ -75,23 +81,24 @@ window.addEventListener('message', event => {
     return;
   }
 
-  if (message.command === 'docsStart') {
-    onDocsStart();
+  if (message.command === 'docStatus') {
+    handleDocStatus(message.content || {});
     return;
   }
 
-  if (message.command === 'docsChunk') {
-    onDocsChunk(message.text || '');
+  if (message.command === 'docGenerating') {
+    handleDocGenerating();
     return;
   }
 
-  if (message.command === 'docsDone') {
-    onDocsDone(message.text || '');
+  if (message.command === 'docProgress') {
+    handleDocProgress(message.content || {});
     return;
   }
 
-  if (message.command === 'docsError') {
-    onDocsError(message.message || 'Unknown error');
+  if (message.command === 'docResult') {
+    handleDocResult(message.content || {});
+    return;
   }
 });
 
@@ -132,17 +139,31 @@ function setupTabs() {
 }
 
 // ── Flow Diagram ─────────────────────────────────────────────────────────────
-async function renderMermaidDiagram() {
+async function renderMermaidDiagram(preserveViewport = false) {
   const viewport = document.getElementById('diagram-viewport');
   if (!viewport) return;
+  // Snapshot current pan/zoom before the async render so we can restore it.
+  const savedPan = { x: state.pan.x, y: state.pan.y };
+  const savedZoom = state.zoom;
   try {
     const model = buildFlowDiagramModel();
     state.diagramNodeMeta = model.nodeMeta;
-    const { svg } = await mermaid.render('flowchart-main', model.source);
+    // bindFunctions MUST be called after innerHTML is set — Mermaid v11 uses it to
+    // attach the click listeners registered via `click nodeId callbackFn` directives.
+    const { svg, bindFunctions } = await mermaid.render('flowchart-main', model.source);
     viewport.innerHTML = `<div>${svg}</div>`;
+    if (bindFunctions) bindFunctions(viewport);
     setupDiagramPan(document.getElementById('mermaid-diagram'), viewport);
     setupNodeClickHandlers(viewport);
-    setTimeout(centerDiagram, 50);
+    if (preserveViewport) {
+      // Restore pan/zoom so the viewport stays where the user had it.
+      state.pan.x = savedPan.x;
+      state.pan.y = savedPan.y;
+      state.zoom = savedZoom;
+      applyTransform(viewport);
+    } else {
+      setTimeout(centerDiagram, 50);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     viewport.innerHTML = `<div style="color:#f44;padding:20px">Render error: ${escHtml(message)}<br><br>Mermaid could not be loaded or rendered. Check network access to jsdelivr or proxy settings.</div>`;
@@ -214,41 +235,52 @@ function setupZoomControls() {
   });
   document.getElementById('center-btn')?.addEventListener('click', centerDiagram);
 }
+// Called by Mermaid's bindFunctions() for every node that has a `click nodeId onMermaidNodeClick`
+// directive.  nodeId is the plain Mermaid ID (e.g. "MW0", "HANDLER", "MW0_C1").
+// Using this official mechanism avoids fragile DOM-id decoding.
+window.onMermaidNodeClick = function onMermaidNodeClick(nodeId) {
+  const meta = state.diagramNodeMeta[nodeId];
+  if (!meta) return;
+
+  // Double-click on a collapsible node: toggle expand/collapse only
+  const now = Date.now();
+  const isDoubleClick = meta.toggleKey
+    && nodeId === state.lastDiagramClick.nodeId
+    && (now - state.lastDiagramClick.time) < 300;
+  state.lastDiagramClick = { nodeId, time: now };
+
+  if (isDoubleClick) {
+    toggleExpandedNode(meta.toggleKey);
+    renderMermaidDiagram(true); // preserve current pan/zoom
+    // fall through — also open the sidebar so the user sees the details
+  }
+
+  // Single click (and double-click): open the details sidebar
+  if (meta.type === 'handler') {
+    openSidebarForHandler();
+    return;
+  }
+
+  if (meta.type === 'middleware') {
+    openSidebarForMiddleware(meta.middlewareIndex);
+    return;
+  }
+
+  if (meta.type === 'component') {
+    openSidebarForComponentNode(meta.filePath, meta.line, meta.kind, meta.hasChildren, meta.metrics);
+    return;
+  }
+
+  if (meta.type === 'external') {
+    openSidebarForExternalCallNode(meta);
+  }
+};
+
 function setupNodeClickHandlers(viewport) {
+  // Cursor styling only — click events are handled by Mermaid's bindFunctions()
+  // via the `click nodeId onMermaidNodeClick` directives in the diagram source.
   viewport.querySelectorAll('.node').forEach(node => {
     node.style.cursor = 'pointer';
-    const id = decodeMermaidNodeId(node.id || '');
-    node.addEventListener('click', e => {
-      e.stopPropagation();
-      const meta = state.diagramNodeMeta[id];
-      if (!meta) {
-        return;
-      }
-
-      const rect = node.getBoundingClientRect();
-      const clickRatio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 1;
-      const clickedToggleZone = clickRatio < 0.22;
-
-      if (meta.toggleKey && clickedToggleZone) {
-        toggleExpandedNode(meta.toggleKey);
-        renderMermaidDiagram();
-        return;
-      }
-
-      if (meta.type === 'handler') {
-        openSidebarForHandler();
-        return;
-      }
-
-      if (meta.type === 'middleware') {
-        openSidebarForMiddleware(meta.middlewareIndex);
-        return;
-      }
-
-      if (meta.type === 'component') {
-        openSidebarForComponentNode(meta.filePath, meta.line, meta.kind, meta.hasChildren, meta.metrics);
-      }
-    });
   });
 }
 
@@ -256,11 +288,14 @@ function decodeMermaidNodeId(rawId) {
   if (!rawId) {
     return '';
   }
-  const m = rawId.match(/^flowchart-main-(.*)-\d+$/);
+  // Mermaid v11:  'flowchart-{nodeId}-{counter}'       e.g. 'flowchart-MW0-3'
+  // Mermaid v9:   'flowchart-main-{nodeId}-{counter}'  e.g. 'flowchart-main-MW0-3'
+  // The chart render name ('flowchart-main') is NOT used as a node-ID prefix in v11.
+  const m = rawId.match(/^flowchart-(?:main-)?(.+)-\d+$/);
   if (m && m[1]) {
     return m[1];
   }
-  return rawId.replace(/^flowchart-main-/, '').replace(/-\d+$/, '');
+  return rawId;
 }
 
 function toggleExpandedNode(toggleKey) {
@@ -281,6 +316,15 @@ function buildFlowDiagramModel() {
   const nodeMeta = {};
   const hideSysMiddleware = state.hideSysMiddleware === true;
 
+  // Build a lookup map: normalised filePath → ExternalCall[]
+  const externalCallsByFile = new Map();
+  for (const call of (window.EXTERNAL_CALLS || [])) {
+    const fp = normalizeFsPath(call.filePath || '');
+    if (!fp) continue;
+    if (!externalCallsByFile.has(fp)) externalCallsByFile.set(fp, []);
+    externalCallsByFile.get(fp).push(call);
+  }
+
   const route = endpoint.resolvedPath || endpoint.pathExpression || '/';
   const endpointLabel = formatEndpointLabel(endpoint, route);
   const handlerLocation = endpoint.handlerLocation || {};
@@ -289,6 +333,7 @@ function buildFlowDiagramModel() {
     ? `${handlerLocation.symbolName}\\n${handlerFile}:${handlerLocation.line || 1}`
     : `${handlerFile}:${handlerLocation.line || 1}`;
 
+  lines.push('    classDef extCall fill:#1a2a3a,color:#63b3ed,stroke:#2c5282,stroke-width:1px,stroke-dasharray:4 2');
   lines.push(`    REQ["${escMermaid(endpointLabel)}"]`);
   lines.push('    style REQ fill:#1e3a5f,color:#90cdf4,stroke:#2b6cb0,stroke-width:2px');
   lines.push(`    HANDLER["${escMermaid(handlerLabel)}"]`);
@@ -339,8 +384,23 @@ function buildFlowDiagramModel() {
         parentToggleKey: toggleKey,
         children: directChildren,
         visited: new Set([mwPath]),
-        ancestryToken: nodeId
+        ancestryToken: nodeId,
+        externalCallsByFile
       });
+    }
+
+    // Attach external call nodes for this middleware
+    const mwCalls = externalCallsByFile.get(mwPath) || [];
+    if (mwCalls.length > 0) {
+      appendExternalCallNodes(lines, nodeMeta, nodeId, mwCalls);
+    }
+  }
+
+  // Attach external call nodes for the handler
+  if (handlerPath) {
+    const handlerCalls = externalCallsByFile.get(handlerPath) || [];
+    if (handlerCalls.length > 0) {
+      appendExternalCallNodes(lines, nodeMeta, 'HANDLER', handlerCalls);
     }
   }
 
@@ -353,11 +413,18 @@ function buildFlowDiagramModel() {
     lines.push(`    MW${middleware.length - 1} --> HANDLER`);
   }
 
+  // Add Mermaid `click` directives for every node so bindFunctions() can wire
+  // up click listeners after the SVG is inserted.  The callback is the global
+  // function `onMermaidNodeClick(nodeId)` defined below.
+  for (const nodeId of Object.keys(nodeMeta)) {
+    lines.push(`    click ${nodeId} onMermaidNodeClick`);
+  }
+
   return { source: lines.join('\n'), nodeMeta };
 }
 
 function appendComponentSubtree(ctx) {
-  const { lines, nodeMeta, graph, parentNodeId, parentToggleKey, children, visited, ancestryToken } = ctx;
+  const { lines, nodeMeta, graph, parentNodeId, parentToggleKey, children, visited, ancestryToken, externalCallsByFile } = ctx;
 
   children.forEach((childPath, index) => {
     const childKey = `${parentToggleKey}:${childPath}`;
@@ -385,6 +452,14 @@ function appendComponentSubtree(ctx) {
       toggleKey: hasChildren ? childKey : undefined
     };
 
+    // Attach external call nodes for this component
+    if (externalCallsByFile) {
+      const compCalls = externalCallsByFile.get(normalizeFsPath(childPath)) || [];
+      if (compCalls.length > 0) {
+        appendExternalCallNodes(lines, nodeMeta, childNodeId, compCalls);
+      }
+    }
+
     if (!hasChildren || !expanded || visited.has(childPath)) {
       return;
     }
@@ -399,8 +474,29 @@ function appendComponentSubtree(ctx) {
       parentToggleKey: childKey,
       children: childChildren,
       visited: nextVisited,
-      ancestryToken: childNodeId
+      ancestryToken: childNodeId,
+      externalCallsByFile
     });
+  });
+}
+
+const EXT_CALL_ICONS = { http: '🌐', database: '🗄️', cache: '⚡', queue: '📨', storage: '💾' };
+
+function appendExternalCallNodes(lines, nodeMeta, parentId, calls) {
+  calls.forEach((call, idx) => {
+    const extId = `${parentId}_EXT${idx}`;
+    const icon = EXT_CALL_ICONS[call.type] || '📡';
+    const label = `${icon} ${(call.type || 'ext').toUpperCase()}: ${call.client || 'unknown'}`;
+    lines.push(`    ${extId}(["${escMermaid(label)}"]):::extCall`);
+    lines.push(`    ${parentId} -.-> ${extId}`);
+    nodeMeta[extId] = {
+      type: 'external',
+      filePath: call.filePath,
+      line: call.line,
+      snippet: call.snippet,
+      client: call.client,
+      callType: call.type
+    };
   });
 }
 
@@ -508,43 +604,50 @@ function renderComponentTree() {
 
   const state = buildGraphRenderState(graph);
   container.innerHTML = graph.rootFiles
-    .map(root => buildComponentNodeHtml(root, graph, state, new Set()))
+    .map(root => buildComponentNodeHtml(root, graph, state, new Set(), 0))
     .join('');
 
   container.querySelectorAll('.tree-root-header').forEach((hdr) => {
-    hdr.addEventListener('click', (event) => {
+    hdr.addEventListener('click', (e) => {
       const hasChildren = hdr.dataset.hasChildren === 'true';
       const filePath = hdr.dataset.filepath;
       const line = parseInt(hdr.dataset.line || '1');
       const kind = hdr.dataset.kind || 'dependency';
       const metrics = (state.metricsByPath && state.metricsByPath[filePath]) || { reads: 0, writes: 0, data: 0 };
 
-      const target = event.target;
-      if (target instanceof Element && target.classList.contains('tree-toggle')) {
-        if (!hasChildren) {
-          return;
-        }
-
-        const nodeId = hdr.dataset.nodeId;
-        const root = nodeId ? container.querySelector(`[data-tree-node="${nodeId}"]`) : null;
-        const children = root?.querySelector(':scope > .tree-children');
-        const toggle = root?.querySelector(':scope > .tree-root-header .tree-toggle');
+      // Clicking the toggle arrow always expands/collapses, regardless of single/double click.
+      if (e.target.classList.contains('tree-toggle') && hasChildren) {
+        const root = hdr.closest('.tree-root');
+        const children = root ? root.querySelector(':scope > .tree-children') : null;
         if (children) {
           const open = children.classList.toggle('expanded');
-          if (toggle && !toggle.classList.contains('empty')) {
-            toggle.textContent = open ? '▼' : '▶';
-          }
+          e.target.textContent = open ? '▼' : '▶';
         }
         return;
       }
 
+      // Single click anywhere else opens the sidebar.
       openSidebarForComponentNode(filePath, line, kind, hasChildren, metrics);
     });
 
-    hdr.addEventListener('dblclick', () => {
+    hdr.addEventListener('dblclick', (e) => {
+      const hasChildren = hdr.dataset.hasChildren === 'true';
       const filePath = hdr.dataset.filepath;
       const line = parseInt(hdr.dataset.line || '1');
-      navigate(filePath, line);
+
+      // Double-click on the toggle (or anywhere) expands/collapses if node has children,
+      // otherwise navigates to source.
+      if (hasChildren) {
+        const root = hdr.closest('.tree-root');
+        const children = root ? root.querySelector(':scope > .tree-children') : null;
+        const toggle = hdr.querySelector('.tree-toggle');
+        if (children) {
+          const open = children.classList.toggle('expanded');
+          if (toggle) toggle.textContent = open ? '▼' : '▶';
+        }
+      } else {
+        navigate(filePath, line);
+      }
     });
   });
 
@@ -587,7 +690,7 @@ function buildGraphRenderState(graph) {
   return { idByPath, lineByPath, metricsByPath };
 }
 
-function buildComponentNodeHtml(filePath, graph, state, ancestors) {
+function buildComponentNodeHtml(filePath, graph, state, ancestors, depth = 0) {
   const children = (graph.childrenByFile && graph.childrenByFile[filePath]) || [];
   const kind = (graph.kindByFile && graph.kindByFile[filePath]) || 'dependency';
   const hasChildren = children.length > 0;
@@ -599,6 +702,9 @@ function buildComponentNodeHtml(filePath, graph, state, ancestors) {
   const displayName = shortPath(filePath);
   const badgeHtml = buildNodeBadgeHtml(nodeMetrics);
 
+  // Each depth level adds 16px left padding so children appear visually nested
+  const paddingLeft = 12 + depth * 16;
+
   let childHtml = '';
   if (hasChildren) {
     const nextAncestors = new Set(ancestors);
@@ -608,28 +714,29 @@ function buildComponentNodeHtml(filePath, graph, state, ancestors) {
         const cycleLine = state.lineByPath[childPath] || 1;
         const cycleMetrics = state.metricsByPath[childPath] || { reads: 0, writes: 0, data: 0 };
         const cycleBadgeHtml = buildNodeBadgeHtml(cycleMetrics);
+        const cyclePadding = 12 + (depth + 1) * 16;
         return `<div class="tree-root" data-tree-node="${state.idByPath[childPath] || ''}">
-          <div class="tree-root-header" data-has-children="false" data-kind="dependency" data-filepath="${escAttr(childPath)}" data-line="${cycleLine}">
+          <div class="tree-root-header" style="padding-left:${cyclePadding}px" data-has-children="false" data-kind="dependency" data-filepath="${escAttr(childPath)}" data-line="${cycleLine}">
             <span class="tree-toggle empty">▶</span>
             <span>♻️</span>
             <span class="tree-root-name">${escHtml(shortPath(childPath))}</span>
             <div class="tree-node-badges">${cycleBadgeHtml}</div>
-            <span class="tree-leaf-meta" style="margin-left:auto">cycle reference</span>
+            <span class="tree-leaf-meta">cycle</span>
           </div>
         </div>`;
       }
-      return buildComponentNodeHtml(childPath, graph, state, nextAncestors);
+      return buildComponentNodeHtml(childPath, graph, state, nextAncestors, depth + 1);
     }).join('')}</div>`;
   }
 
   return `
     <div class="tree-root" data-tree-node="${nodeId}">
-      <div class="tree-root-header" data-node-id="${nodeId}" data-has-children="${hasChildren ? 'true' : 'false'}" data-kind="${escAttr(kind)}" data-filepath="${escAttr(filePath)}" data-line="${nodeLine}">
-        <span class="tree-toggle${hasChildren ? '' : ' empty'}">▶</span>
+      <div class="tree-root-header" style="padding-left:${paddingLeft}px" data-has-children="${hasChildren}" data-kind="${escAttr(kind)}" data-filepath="${escAttr(filePath)}" data-line="${nodeLine}">
+        <span class="tree-toggle${hasChildren ? '' : ' empty'}">${hasChildren ? '▶' : '▶'}</span>
         <span>${icon}</span>
         <span class="tree-root-name">${escHtml(displayName)}</span>
         <div class="tree-node-badges">${badgeHtml}</div>
-        <span class="tree-leaf-meta" style="margin-left:auto">${escHtml(title)}</span>
+        <span class="tree-leaf-meta">${escHtml(title)}</span>
       </div>
       ${childHtml}
     </div>`;
@@ -1092,6 +1199,29 @@ function openSidebarForComponentNode(filePath, line, kind, hasChildren, metrics)
   `, { viewKey: `component:${normalizedPath}` });
 }
 
+function openSidebarForExternalCallNode(meta) {
+  const icons = { http: '🌐', database: '🗄️', cache: '⚡', queue: '📨', storage: '💾' };
+  const icon = icons[meta.callType] || '📡';
+  const typeLabel = (meta.callType || 'external').toUpperCase();
+  const title = `${icon} ${typeLabel}: ${meta.client || 'unknown'}`;
+
+  setSidebar(title, `
+    ${renderSidebarFileSection('📁 Detected In', meta.filePath, meta.line || 1)}
+    <div class="sb-section">
+      <div class="sb-section-title">ℹ️ External Call</div>
+      <div class="sb-kv-list">
+        <div class="sb-kv"><span>Type</span><strong>${escHtml(typeLabel)}</strong></div>
+        <div class="sb-kv"><span>Client</span><strong>${escHtml(meta.client || 'unknown')}</strong></div>
+        <div class="sb-kv"><span>Line</span><strong>${Number(meta.line || 1)}</strong></div>
+      </div>
+    </div>
+    ${meta.snippet ? `<div class="sb-section">
+      <div class="sb-section-title">💬 Snippet</div>
+      <pre class="sb-snippet">${escHtml(meta.snippet)}</pre>
+    </div>` : ''}
+  `, { viewKey: `external:${meta.filePath}:${meta.line}` });
+}
+
 function renderSidebarFileSection(title, filePath, line) {
   if (!filePath) {
     return `<div class="sb-section"><div class="sb-section-title">${title}</div><div class="no-params">Location not resolved</div></div>`;
@@ -1322,6 +1452,16 @@ function isSystemMiddleware(mw) {
   const name = String(mw.name || '').toLowerCase().replace(/\\/g, '/');
   const shortName = name.split('/').pop() || name;
   if (name.includes('node_modules')) return true;
+
+  // Check if the middleware file lives under a registered library root
+  // (packages listed in nodeApiForge.searchComponentLibAllowlist that may be
+  // cloned locally rather than installed in node_modules)
+  const mwFilePath = normalizeFsPath((mw.location && mw.location.filePath) || '');
+  const libRoots = window.SYS_MW_LIB_ROOTS || [];
+  if (mwFilePath && libRoots.some(root => mwFilePath.startsWith(normalizeFsPath(root) + '/'))) {
+    return true;
+  }
+
   const baseName = shortName.replace(/\.\w+$/, '');
   return SYSTEM_MIDDLEWARE_NAMES.has(baseName) || SYSTEM_MIDDLEWARE_NAMES.has(name);
 }
@@ -1442,69 +1582,148 @@ function renderExternalCalls() {
 }
 
 // ── AI Documentation Generation ───────────────────────────────────────────────
-function setupDocGeneration() {
-  const btn = document.getElementById('generate-docs-btn');
-  btn?.addEventListener('click', () => {
-    vscode.postMessage({ command: 'generateDocs' });
+function setupDocButtons() {
+  document.getElementById('generate-doc-btn')?.addEventListener('click', () => {
+    vscode.postMessage({ command: 'generateDoc' });
+  });
+  document.getElementById('open-doc-file-btn')?.addEventListener('click', () => {
+    vscode.postMessage({ command: 'openDocFile' });
   });
 }
 
-function onDocsStart() {
-  const aiContent = document.getElementById('doc-ai-content');
-  const staticContent = document.getElementById('doc-content');
-  if (!aiContent || !staticContent) return;
+function handleDocStatus(content) {
+  const statusEl  = document.getElementById('doc-status');
+  const summaryEl = document.getElementById('doc-summary');
+  const contentEl = document.getElementById('doc-content');
+  const openBtn   = document.getElementById('open-doc-file-btn');
+  const genBtn    = document.getElementById('generate-doc-btn');
 
-  state.docsAccumulatedText = '';
-  staticContent.style.display = 'none';
-  aiContent.style.display = '';
-  aiContent.innerHTML = '<div style="color:var(--text-muted);padding:16px">✨ Generating documentation…</div>';
-
-  const btn = document.getElementById('generate-docs-btn');
-  if (btn instanceof HTMLButtonElement) {
-    btn.disabled = true;
-    btn.textContent = '⏳ Generating…';
+  if (content.exists) {
+    if (statusEl)  { statusEl.style.display  = 'none'; }
+    if (summaryEl) {
+      summaryEl.style.display = 'block';
+      summaryEl.innerHTML = `<div class="doc-summary-box"><strong>Summary:</strong> ${escHtml(content.summary || '')}</div>`;
+    }
+    if (contentEl) {
+      contentEl.style.display = 'block';
+      contentEl.innerHTML = renderMarkdown(content.doc || '');
+    }
+    if (openBtn) { openBtn.style.display = 'inline-flex'; }
+    if (genBtn)  {
+      genBtn.textContent = '🔄 Regenerate';
+      genBtn.disabled = false;
+    }
+  } else {
+    if (statusEl) {
+      statusEl.style.display = 'block';
+      statusEl.innerHTML = content.hasCopilot === false
+        ? `<div class="doc-empty-state">
+            <p>No documentation generated yet.</p>
+            <p class="doc-hint">GitHub Copilot is required to generate documentation.</p>
+          </div>`
+        : `<div class="doc-empty-state">
+            <p>No documentation generated yet for this endpoint.</p>
+            <p class="doc-hint">Click <strong>✨ Generate</strong> to create documentation using Copilot.</p>
+          </div>`;
+    }
+    if (summaryEl) { summaryEl.style.display = 'none'; }
+    if (contentEl) { contentEl.style.display = 'none'; }
+    if (openBtn)   { openBtn.style.display = 'none'; }
+    if (genBtn)    { genBtn.textContent = '✨ Generate'; genBtn.disabled = false; }
   }
 }
 
-function onDocsChunk(text) {
-  state.docsAccumulatedText += text;
-  const aiContent = document.getElementById('doc-ai-content');
-  if (aiContent) {
-    aiContent.innerHTML = `<div class="doc-section"><div class="doc-section-body"><div class="doc-description" style="white-space:pre-wrap;font-family:inherit">${escHtml(state.docsAccumulatedText)}</div></div></div>`;
-  }
-}
+function handleDocGenerating() {
+  const statusEl  = document.getElementById('doc-status');
+  const contentEl = document.getElementById('doc-content');
+  const genBtn    = document.getElementById('generate-doc-btn');
 
-function onDocsDone(fullText) {
-  state.docsAccumulatedText = fullText;
-  const aiContent = document.getElementById('doc-ai-content');
-  if (aiContent) {
-    aiContent.innerHTML = `<div class="doc-section"><div class="doc-section-body"><div class="doc-description" style="white-space:pre-wrap;font-family:inherit">${escHtml(fullText)}</div></div></div>
-      <div style="margin-top:12px;padding:0 16px">
-        <button id="show-static-docs-btn" style="font-size:12px;padding:4px 10px;cursor:pointer">↩ Show original docs</button>
+  if (statusEl) {
+    statusEl.style.display = 'block';
+    statusEl.innerHTML = `
+      <div class="doc-loading-state">
+        <div class="loading-spinner"></div>
+        <p>Generating documentation with Copilot...</p>
+        <p class="doc-hint">This may take a moment — multi-phase analysis in progress.</p>
+        <div id="doc-progress-log" class="doc-progress-log"></div>
       </div>`;
-    document.getElementById('show-static-docs-btn')?.addEventListener('click', () => {
-      aiContent.style.display = 'none';
-      const staticContent = document.getElementById('doc-content');
-      if (staticContent) staticContent.style.display = '';
-    });
   }
-  const btn = document.getElementById('generate-docs-btn');
-  if (btn instanceof HTMLButtonElement) {
-    btn.disabled = false;
-    btn.textContent = '✨ Regenerate';
+  if (contentEl) { contentEl.style.display = 'none'; }
+  if (genBtn instanceof HTMLButtonElement) {
+    genBtn.disabled = true;
+    genBtn.textContent = '⏳ Generating…';
   }
 }
 
-function onDocsError(message) {
-  const aiContent = document.getElementById('doc-ai-content');
-  if (aiContent) {
-    aiContent.innerHTML = `<div style="color:#f88;padding:16px">⚠️ ${escHtml(message)}</div>`;
+function handleDocProgress(content) {
+  const logEl = document.getElementById('doc-progress-log');
+  if (!logEl) return;
+
+  const step   = content.step   || '';
+  const detail = content.detail || '';
+
+  let stepClass = 'step';
+  if (step.startsWith('Phase') || step.startsWith('Step')) { stepClass = 'step phase'; }
+  else if (step.includes('✓')) { stepClass = 'step success'; }
+  else if (step.includes('⚠')) { stepClass = 'step warn'; }
+  else if (step.includes('✗')) { stepClass = 'step error'; }
+
+  const line = document.createElement('div');
+  line.className = 'doc-progress-line';
+  line.innerHTML =
+    `<span class="${stepClass}">${escHtml(step)}</span>` +
+    (detail ? `<span class="detail"> — ${escHtml(detail)}</span>` : '');
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function handleDocResult(content) {
+  const genBtn = document.getElementById('generate-doc-btn');
+  if (genBtn instanceof HTMLButtonElement) {
+    genBtn.disabled = false;
+    genBtn.textContent = content.exists ? '🔄 Regenerate' : '✨ Generate';
   }
-  const staticContent = document.getElementById('doc-content');
-  if (staticContent) staticContent.style.display = '';
-  const btn = document.getElementById('generate-docs-btn');
-  if (btn instanceof HTMLButtonElement) {
-    btn.disabled = false;
-    btn.textContent = '✨ Generate with AI';
+  if (content.exists) {
+    handleDocStatus(content);
+  } else {
+    const statusEl = document.getElementById('doc-status');
+    if (statusEl) {
+      statusEl.style.display = 'block';
+      statusEl.innerHTML = `<div class="doc-error-state"><p>⚠️ ${escHtml(content.error || 'Failed to generate documentation.')}</p></div>`;
+    }
   }
+}
+
+/**
+ * Simple markdown-to-HTML renderer.
+ */
+function renderMarkdown(md) {
+  if (!md) return '';
+  let html = md
+    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="doc-code-block"><code>$2</code></pre>')
+    .replace(/^---+$/gm, '<hr class="doc-hr">')
+    .replace(/^#### (.+)$/gm, '<h4>$1</h4>')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code class="doc-inline-code">$1</code>')
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    // Process complete markdown tables as a block: header row + separator + body rows.
+    // Doing this in one pass avoids blank lines from empty separator replacements.
+    .replace(/^(\|.+\|)[ \t]*\n\|[-| :]+\|[ \t]*\n((?:\|.+\|[ \t]*\n?)*)/gm, (_match, headerRow, bodyRows) => {
+      const headers = headerRow.replace(/^\||\|$/g, '').split('|').map(c => `<td>${c.trim()}</td>`).join('');
+      const rows = bodyRows.trim().split('\n').filter(Boolean).map(row => {
+        const cells = row.replace(/^\||\|$/g, '').split('|').map(c => `<td>${c.trim()}</td>`).join('');
+        return `<tr>${cells}</tr>`;
+      }).join('');
+      return `<table class="doc-table"><tr>${headers}</tr>${rows}</table>`;
+    })
+    .replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>')
+    .replace(/\n+((<\/?(?:h[1-4]|table|ul|pre|div|hr)>)|$)/g, '$1')
+    .replace(/((<\/?(?:h[1-4]|table|ul|pre|div|hr)>))\n+/g, '$1')
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/\n/g, '<br>')
+    .replace(/<p>\s*<\/p>/g, '');
+  return `<div class="doc-rendered"><p>${html}</p></div>`;
 }

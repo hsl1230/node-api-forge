@@ -5,6 +5,7 @@ import { analyzeHandlerMetadata, extractPathParameters } from './analyzer';
 import { FrameworkDetector } from './framework-detector';
 import { ApiDiscoveryProvider } from './provider';
 import { loadHybridSeedEndpoints } from './seed-loader';
+import { collectSourceFiles } from './source-files';
 import { ApiEndpoint, ApiParameter, DiscoveryContext, DiscoveryResult, ParameterLocation, SourceLocation } from './types';
 
 interface CachedComponentDependencies {
@@ -210,6 +211,7 @@ export class ApiDiscoveryEngine {
   public invalidateCaches(projectRoots?: string[]): void {
     this.componentDependencyGraph.invalidate(projectRoots);
     this.invalidateEndpointParameterCache(projectRoots);
+    invalidateResolutionCache(projectRoots);
 
     for (const provider of this.providers) {
       if (typeof provider.clearCache !== 'function') {
@@ -225,6 +227,15 @@ export class ApiDiscoveryEngine {
 
       provider.clearCache();
     }
+  }
+
+  /**
+   * Run component dependency analysis for a single endpoint.
+   * Call this on-demand (e.g. when opening the flow diagram) instead of during bulk discovery
+   * when `skipComponentAnalysis: true` was used.
+   */
+  public enrichEndpoint(endpoint: ApiEndpoint, contextProperties?: string[]): void {
+    this.enrichEndpointParametersFromComponents(endpoint, contextProperties);
   }
 
   public async discover(context: DiscoveryContext): Promise<DiscoveryResult> {
@@ -251,43 +262,55 @@ export class ApiDiscoveryEngine {
 
     for (const projectRoot of projectRoots) {
       const fingerprint = this.detector.buildFingerprint(projectRoot);
+      // Pre-collect source files once for this project root and share across all providers.
+      fingerprint.sourceFiles = collectSourceFiles(projectRoot);
+
       const frameworks = context.frameworksByProjectRoot?.[projectRoot]
         ?? this.detector.detectFrameworks(fingerprint);
       merged.stats.frameworksDetected.push(...frameworks);
 
-      for (const provider of this.providers) {
+      // Collect eligible providers and run them in parallel.
+      const eligibleProviders = this.providers.filter(provider => {
         const providerFramework = this.providerFramework(provider.id);
-        const shouldRunProvider = providerFramework === 'unknown'
+        const frameworkMatch = providerFramework === 'unknown'
           || frameworks.includes('unknown')
           || frameworks.includes(providerFramework);
-        if (!shouldRunProvider) {
-          continue;
-        }
-
+        if (!frameworkMatch) return false;
         const support = provider.supports(fingerprint);
-        if (!support.supported && !forceProviderAnalysis) {
-          continue;
-        }
+        return support.supported || forceProviderAnalysis;
+      });
 
-        merged.stats.providersRun.push(provider.id);
-        try {
-          const result = await provider.discover(context, fingerprint);
-          merged.endpoints.push(...result.endpoints);
-          merged.warnings.push(...result.warnings);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          merged.warnings.push({
-            code: 'provider-failed',
-            framework: providerFramework,
-            message: `Provider ${provider.id} failed: ${message}`
-          });
+      merged.stats.providersRun.push(...eligibleProviders.map(p => p.id));
+
+      const providerResults = await Promise.all(
+        eligibleProviders.map(async (provider) => {
+          try {
+            return await provider.discover(context, fingerprint);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const framework = this.providerFramework(provider.id);
+            return {
+              endpoints: [] as DiscoveryResult['endpoints'],
+              warnings: [{ code: 'provider-failed' as const, framework, message: `Provider ${provider.id} failed: ${message}` }],
+              stats: { frameworksDetected: [], providersRun: [], endpointCount: 0, unresolvedEndpointCount: 0, scanDurationMs: 0 }
+            };
+          }
+        })
+      );
+
+      for (const result of providerResults) {
+        for (const ep of result.endpoints) {
+          if (!ep.projectRoot) ep.projectRoot = projectRoot;
         }
+        merged.endpoints.push(...result.endpoints);
+        merged.warnings.push(...result.warnings);
       }
 
       const seed = loadHybridSeedEndpoints(projectRoot, context);
       console.log('[discovery-engine] loadHybridSeedEndpoints returned', seed.endpoints.length, 'endpoints and', seed.warnings.length, 'warnings');
       merged.warnings.push(...seed.warnings);
       for (const seedEndpoint of seed.endpoints) {
+        if (!seedEndpoint.projectRoot) seedEndpoint.projectRoot = projectRoot;
         const matched = merged.endpoints.find((autoEndpoint) => this.endpointKey(autoEndpoint) === this.endpointKey(seedEndpoint));
         if (!matched) {
           merged.endpoints.push(seedEndpoint);
@@ -304,23 +327,31 @@ export class ApiDiscoveryEngine {
       }
     }
 
+    // Always extract path parameters from the route pattern (cheap — regex only, no file I/O).
     for (const endpoint of merged.endpoints) {
       enrichEndpointPathParameters(endpoint);
-      const enrichment = this.enrichEndpointParametersFromComponents(endpoint, context.contextProperties);
-      if (enrichment.reused) {
-        parameterCacheReusedEndpoints += 1;
-      } else {
-        parameterCacheRecomputedEndpoints += 1;
-      }
+    }
 
-      if (enrichment.truncated) {
-        parameterTraversalTruncatedEndpoints += 1;
-        merged.warnings.push({
-          code: 'component-dependency-limit-reached',
-          framework: endpoint.framework,
-          filePath: endpoint.handlerLocation.filePath,
-          message: `Parameter discovery stopped early for ${endpoint.method} ${endpoint.resolvedPath ?? endpoint.pathExpression} after scanning ${COMPONENT_DEPENDENCY_MAX_FILES} dependent files. Some inferred parameters may be missing.`
-        });
+    // Component analysis: BFS dependency traversal + TS parse per file.
+    // Skip when skipComponentAnalysis is set — callers use enrichEndpoint() on demand.
+    if (!context.skipComponentAnalysis) {
+      for (const endpoint of merged.endpoints) {
+        const enrichment = this.enrichEndpointParametersFromComponents(endpoint, context.contextProperties);
+        if (enrichment.reused) {
+          parameterCacheReusedEndpoints += 1;
+        } else {
+          parameterCacheRecomputedEndpoints += 1;
+        }
+
+        if (enrichment.truncated) {
+          parameterTraversalTruncatedEndpoints += 1;
+          merged.warnings.push({
+            code: 'component-dependency-limit-reached',
+            framework: endpoint.framework,
+            filePath: endpoint.handlerLocation.filePath,
+            message: `Parameter discovery stopped early for ${endpoint.method} ${endpoint.resolvedPath ?? endpoint.pathExpression} after scanning ${COMPONENT_DEPENDENCY_MAX_FILES} dependent files. Some inferred parameters may be missing.`
+          });
+        }
       }
     }
 
@@ -597,16 +628,43 @@ function resolveDependencyFile(specifier: string, fromFile: string): string | un
   return resolveLocalModule(specifier, path.dirname(fromFile));
 }
 
+/**
+ * Module-level cache for resolved local module paths.
+ * Key: `fromDir\0specifier` → resolved absolute path (or empty string = not found).
+ * Entries that belong to a changed file are cleared in `invalidateResolutionCache`.
+ */
+const resolutionCache = new Map<string, string>();
+
+function invalidateResolutionCache(projectRoots?: string[]): void {
+  if (!projectRoots || projectRoots.length === 0) {
+    resolutionCache.clear();
+    return;
+  }
+  const normalizedRoots = projectRoots.map(r => normalizeFilePath(r));
+  for (const key of resolutionCache.keys()) {
+    const dir = key.split('\x00')[0];
+    if (normalizedRoots.some(root => dir === root || dir.startsWith(`${root}/`))) {
+      resolutionCache.delete(key);
+    }
+  }
+}
+
 function resolveLocalModule(specifierOrPath: string, fromDir: string): string | undefined {
+  const cacheKey = `${fromDir}\x00${specifierOrPath}`;
+  const cached = resolutionCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached || undefined; // empty string = negative cache
+  }
+
   const candidate = path.isAbsolute(specifierOrPath)
     ? specifierOrPath
     : path.resolve(fromDir, specifierOrPath);
 
   const ext = path.extname(candidate);
+  // Prefer TypeScript sources first, then JavaScript, then index files
   const candidates = ext
     ? [candidate]
     : [
-        candidate,
         `${candidate}.ts`,
         `${candidate}.tsx`,
         `${candidate}.js`,
@@ -615,6 +673,7 @@ function resolveLocalModule(specifierOrPath: string, fromDir: string): string | 
         `${candidate}.cts`,
         `${candidate}.mjs`,
         `${candidate}.cjs`,
+        candidate,
         path.join(candidate, 'index.ts'),
         path.join(candidate, 'index.tsx'),
         path.join(candidate, 'index.js'),
@@ -629,6 +688,7 @@ function resolveLocalModule(specifierOrPath: string, fromDir: string): string | 
     try {
       const stat = fs.statSync(option);
       if (stat.isFile()) {
+        resolutionCache.set(cacheKey, option);
         return option;
       }
     } catch {
@@ -636,6 +696,7 @@ function resolveLocalModule(specifierOrPath: string, fromDir: string): string | 
     }
   }
 
+  resolutionCache.set(cacheKey, ''); // negative cache
   return undefined;
 }
 

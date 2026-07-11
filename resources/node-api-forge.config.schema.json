@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Node API Forge Configuration",
+  "description": "Shared project configuration for Node API Forge.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "frameworks": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["auto", "express", "fastify", "nestjs", "lambda"]
+      },
+      "default": ["auto"],
+      "description": "Framework hints for discovery. Provide one or multiple values for mixed projects. Use [\"auto\"] to auto-detect and cache by project."
+    },
+    "customSeedLoaderModulePath": {
+      "type": "string",
+      "default": "",
+      "description": "Path to a JS module that exports loadSeedManifestEndpoints(projectRoot, context). Relative to the workspace root unless absolute."
+    },
+    "autoRefreshOnFileChanges": {
+      "type": "boolean",
+      "default": true,
+      "description": "Automatically refresh discovery when relevant source files change."
+    },
+    "contextProperties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": ["locals"],
+      "description": "Shared context sub-properties to track on inferred request/response objects."
+    },
+    "searchComponentLibAllowlist": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "Library package names that Flow Search may traverse as part of endpoint component-tree expansion."
+    },
+    "externalCallLibraries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["package", "client", "type"],
+        "properties": {
+          "package": {
+            "type": "string",
+            "description": "npm package name as it appears in import/require strings."
+          },
+          "client": {
+            "type": "string",
+            "description": "Short display name shown in the External Calls tab."
+          },
+          "type": {
+            "type": "string",
+            "enum": ["http", "database", "cache", "queue", "storage"],
+            "description": "Category for the external call."
+          }
+        },
+        "additionalProperties": false
+      },
+      "default": []
+    },
+    "apiExplorerFrameworkPageSize": {
+      "type": "number",
+      "default": 200,
+      "minimum": 25,
+      "maximum": 1000,
+      "description": "Maximum endpoints to render per API Explorer framework page when a framework has many endpoints."
+    }
+  }
+}

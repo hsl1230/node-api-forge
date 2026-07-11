@@ -59,6 +59,7 @@ export interface ApiEndpoint {
   method: string;
   framework: ApiFramework;
   projectName?: string;
+  projectRoot?: string;       // Set by discovery engine — the project root this endpoint belongs to
   pathExpression: string;
   resolvedPath?: string;
   displayName?: string;
@@ -115,6 +116,8 @@ export interface FrameworkFingerprint {
     scripts?: Record<string, string>;
   };
   evidenceFiles: string[];
+  /** Pre-collected source files for this project root, shared across all providers in one run. */
+  sourceFiles?: string[];
 }
 
 export interface DiscoveryContext {
@@ -129,4 +132,12 @@ export interface DiscoveryContext {
    * Add names like "context" or "state" for custom patterns.
    */
   contextProperties?: string[];
+  /**
+   * When true, skip the per-endpoint component dependency traversal during discovery.
+   * Endpoints are returned with only the information found directly in route files
+   * (method, path, handler location, middleware list). Use `ApiDiscoveryEngine.enrichEndpoint()`
+   * to populate parameters for a specific endpoint on demand.
+   * Defaults to false (full analysis).
+   */
+  skipComponentAnalysis?: boolean;
 }

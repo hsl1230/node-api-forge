@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DISCOVER_APIS_COMMAND_ID, OPEN_HTTP_FORGE_COMMAND_ID } from '../commands';
+import { getNodeApiForgeApiExplorerFrameworkPageSize } from '../config/project-config';
 import { ApiDiscoveryEngine } from './discovery-engine';
 import { formatEndpointDisplayLabel } from './endpoint-display';
 import { resolveProjectName } from './project-name';
@@ -198,9 +199,8 @@ function groupByProject(endpoints: ApiEndpoint[], context?: DiscoveryContext): R
 }
 
 function getFrameworkEndpointPageSize(): number {
-  const configured = vscode.workspace
-    .getConfiguration('nodeApiForge')
-    .get<number>('apiExplorerFrameworkPageSize', 200);
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const configured = getNodeApiForgeApiExplorerFrameworkPageSize(workspaceRoot);
 
   if (!Number.isFinite(configured)) {
     return 200;

@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.1.1 2026-07-10
+
+### Added
+
+- Project-level config file support via `.http-forge/node-api-forge.config.json`, with schema validation (`resources/node-api-forge.config.schema.json`).
+- New flow analyzer capabilities: External Calls tab, richer detail sidebar navigation, and expanded endpoint analysis controls.
+- New endpoint commands for faster workflow:
+	- `Node API Forge: Search in Endpoint Files`
+	- `Node API Forge: Go to Test File`
+	- `Node API Forge: Export Project Collection`
+	- `Node API Forge: Export Framework Collection`
+- `externalCallLibraries` config support for labeling/classifying non-default library calls in flow analysis.
+
+### Changed
+
+- Documentation now uses project config property names (`frameworks`, `customSeedLoaderModulePath`, `contextProperties`, etc.) instead of legacy VS Code setting key examples.
+- Custom seed-loader guidance now reflects workspace-root path resolution and updated framework coverage.
+
+### Fixed
+
+- Analyzer architecture docs now reference the correct paging config location (`apiExplorerFrameworkPageSize` in `.http-forge/node-api-forge.config.json`).
+
 ## 0.0.4 2026-07-09
 
 ### Added

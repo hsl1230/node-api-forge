@@ -2,7 +2,7 @@
   "name": "node-api-forge",
   "displayName": "Node API Forge",
   "description": "Discover, test, and document Node APIs without Swagger—no app integration, full testing workflows, pure source-to-API in seconds.",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "henry-huang",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -144,6 +144,12 @@
         }
       ]
     },
+    "jsonValidation": [
+      {
+        "fileMatch": ".http-forge/node-api-forge.config.json",
+        "url": "./resources/node-api-forge.config.schema.json"
+      }
+    ],
     "menus": {
       "view/title": [
         {
@@ -195,63 +201,6 @@
           "when": "view == nodeApiForge.apiExplorer && viewItem == frameworkGroup"
         }
       ]
-    },
-    "configuration": {
-      "title": "Node API Forge",
-      "properties": {
-        "nodeApiForge.frameworks": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "auto",
-              "express",
-              "fastify",
-              "nestjs",
-              "lambda"
-            ]
-          },
-          "default": [
-            "auto"
-          ],
-          "description": "Framework hints for discovery. Provide one or multiple values for mixed projects (for example [\"express\", \"nestjs\"]). Use [\"auto\"] to auto-detect and cache by project."
-        },
-        "nodeApiForge.customSeedLoaderModulePath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to a JS module that exports loadSeedManifestEndpoints(projectRoot, context). Relative to each project root unless absolute. Provide your own loader to supply seed endpoints to the extension."
-        },
-        "nodeApiForge.autoRefreshOnFileChanges": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically refresh discovery when relevant source files change. New files that are not yet referenced by discovered components are ignored to reduce noise."
-        },
-        "nodeApiForge.contextProperties": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "locals"
-          ],
-          "description": "Shared context sub-properties to track on inferred request/response objects (for example ['locals', 'context'])."
-        },
-        "nodeApiForge.searchComponentLibAllowlist": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Library package names that Flow Search may traverse as part of endpoint component-tree expansion (for example internal shared libs that handle params/headers). Non-allowlisted external libraries are treated as traversal boundaries."
-        },
-        "nodeApiForge.apiExplorerFrameworkPageSize": {
-          "type": "number",
-          "default": 200,
-          "minimum": 25,
-          "maximum": 1000,
-          "description": "Maximum endpoints to render per API Explorer framework page when a framework has many endpoints. Larger values show fewer pages but can increase expansion time."
-        }
-      }
     }
   },
   "scripts": {

@@ -8,8 +8,14 @@ const SKIP_DIRS = new Set([
   'dist',
   'build',
   'out',
-  'coverage'
+  'coverage',
+  '__tests__',
+  '__mocks__',
+  '__fixtures__'
 ]);
+
+// Files that are never route definitions — skip them to reduce parsing cost
+const SKIP_FILE_RE = /\.(?:test|spec|stories|min)\.[cm]?[tj]sx?$|\.d\.[cm]?ts$/;
 
 export function collectSourceFiles(projectRoot: string): string[] {
   const srcFiles: string[] = [];
@@ -34,6 +40,10 @@ export function collectSourceFiles(projectRoot: string): string[] {
       }
 
       if (!entry.isFile()) {
+        continue;
+      }
+
+      if (SKIP_FILE_RE.test(entry.name)) {
         continue;
       }
 

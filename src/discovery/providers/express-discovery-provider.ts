@@ -50,7 +50,7 @@ export class ExpressDiscoveryProvider implements ApiDiscoveryProvider {
     const startedAt = Date.now();
     const warnings: DiscoveryResult['warnings'] = [];
     const endpoints: ApiEndpoint[] = [];
-    const files = collectSourceFiles(fingerprint.projectRoot);
+    const files = fingerprint.sourceFiles ?? collectSourceFiles(fingerprint.projectRoot);
 
     this.pruneDeletedFiles(fingerprint.projectRoot, files);
 

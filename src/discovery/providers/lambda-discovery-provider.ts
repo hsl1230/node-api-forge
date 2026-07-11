@@ -139,7 +139,7 @@ export class LambdaDiscoveryProvider implements ApiDiscoveryProvider {
 
     // Strategy 3: Handler-scan fallback when no config routes found
     if (endpoints.length === 0) {
-      const files = collectSourceFiles(projectRoot);
+      const files = fingerprint.sourceFiles ?? collectSourceFiles(projectRoot);
       this.pruneDeletedFiles(projectRoot, files);
 
       for (const filePath of files) {
